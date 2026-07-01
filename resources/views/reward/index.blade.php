@@ -326,7 +326,7 @@
             try {
                 res = await fetch(WS_URL, options);
             } catch (err) {
-                throw new Error('Tidak dapat terhubung ke server API. Pastikan WS_URL mengarah ke domain yang sama (mis. /api/index.php).');
+                throw new Error('Tidak dapat terhubung ke server API aplikasi (/api/reward). Cek koneksi domain dan cache Laravel.');
             }
 
             const data = await res.json().catch(() => ({}));

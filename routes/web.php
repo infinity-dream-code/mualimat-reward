@@ -22,10 +22,7 @@ Route::get('/', function () {
         }
     }
 
-    $wsUrl = env('WS_URL');
-    if (empty($wsUrl)) {
-        $wsUrl = url('/api/reward');
-    }
+    $wsUrl = url('/api/reward');
 
     return view('reward.index', [
         'wsUrl'   => $wsUrl,
