@@ -200,7 +200,7 @@
 <body>
     <div class="page">
         <div class="brand">
-            <img src="{{ asset('img/logo-mualimat.svg') }}" alt="Logo Mualimat">
+            <img src="{{ $logoUrl }}" alt="Logo Mualimat">
             <h1>Input Prestasi Siswa</h1>
             <p>Madrasah Mu'allimaat Muhammadiyah</p>
         </div>
