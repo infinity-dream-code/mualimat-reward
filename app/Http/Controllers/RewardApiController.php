@@ -69,9 +69,13 @@ class RewardApiController extends Controller
                 return response()->json($json, $status > 0 ? $status : 200);
             }
 
+            $raw = preg_replace('/\s+/', ' ', (string) $response->body());
+            $raw = trim((string) $raw);
+            $raw = mb_substr($raw, 0, 220);
+
             return response()->json([
                 "status" => $response->status(),
-                "message" => "Respons WS bukan JSON",
+                "message" => "Respons WS bukan JSON | HTTP: " . $response->status() . " | RAW: " . $raw,
                 "raw" => $response->body(),
             ], $response->status());
         } catch (\Throwable $e) {
