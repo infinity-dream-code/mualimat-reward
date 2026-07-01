@@ -329,7 +329,17 @@
                 throw new Error('Tidak dapat terhubung ke server API aplikasi (/api/reward). Cek koneksi domain dan cache Laravel.');
             }
 
-            const data = await res.json().catch(() => ({}));
+            const responseText = await res.text();
+            let data = {};
+            try {
+                data = responseText ? JSON.parse(responseText) : {};
+            } catch (e) {
+                data = {
+                    status: res.status || 500,
+                    message: 'Respons API bukan JSON',
+                    raw: responseText,
+                };
+            }
 
             if (!res.ok || data.status !== 200) {
                 let detail = data.message || 'Permintaan gagal';
@@ -337,6 +347,7 @@
                     const raw = String(data.raw).replace(/\s+/g, ' ').trim();
                     detail += ' | RAW: ' + raw.slice(0, 180);
                 }
+                detail += ` | HTTP: ${res.status}`;
                 throw new Error(detail);
             }
 
