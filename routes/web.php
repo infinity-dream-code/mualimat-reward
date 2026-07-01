@@ -22,8 +22,13 @@ Route::get('/', function () {
         }
     }
 
+    $wsUrl = env('WS_URL');
+    if (empty($wsUrl)) {
+        $wsUrl = url('/api/reward');
+    }
+
     return view('reward.index', [
-        'wsUrl'  => env('WS_URL', 'http://10.99.23.111/ws_client/Mualimat_reward/index.php'),
+        'wsUrl'   => $wsUrl,
         'logoUrl' => $logoUrl,
     ]);
 });

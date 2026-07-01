@@ -322,7 +322,13 @@
                 options.body = JSON.stringify(payload);
             }
 
-            const res = await fetch(WS_URL, options);
+            let res;
+            try {
+                res = await fetch(WS_URL, options);
+            } catch (err) {
+                throw new Error('Tidak dapat terhubung ke server API. Pastikan WS_URL mengarah ke domain yang sama (mis. /api/index.php).');
+            }
+
             const data = await res.json().catch(() => ({}));
 
             if (!res.ok || data.status !== 200) {
