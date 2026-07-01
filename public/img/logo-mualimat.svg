@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" role="img" aria-label="Mualimat">
+  <defs>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1b5e20"/>
+      <stop offset="100%" style="stop-color:#2e7d32"/>
+    </linearGradient>
+  </defs>
+  <circle cx="100" cy="100" r="96" fill="url(#g)"/>
+  <circle cx="100" cy="100" r="82" fill="none" stroke="#fff" stroke-width="3" opacity="0.9"/>
+  <text x="100" y="88" text-anchor="middle" fill="#fff" font-family="Georgia, serif" font-size="22" font-weight="bold">Mu'allimaat</text>
+  <text x="100" y="118" text-anchor="middle" fill="#c8e6c9" font-family="Arial, sans-serif" font-size="13">Muhammadiyah</text>
+  <path d="M55 140 Q100 165 145 140" fill="none" stroke="#a5d6a7" stroke-width="2"/>
+</svg>
