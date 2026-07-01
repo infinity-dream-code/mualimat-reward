@@ -30,7 +30,14 @@ class RewardApiController extends Controller
         }
 
         try {
-            $payload = $request->except("file");
+            if ($method === "submitPrestasi" && !$request->hasFile("file")) {
+                return response()->json([
+                    "status" => 422,
+                    "message" => "File tidak diterima server. Cek upload_max_filesize/post_max_size PHP dan nginx client_max_body_size.",
+                ], 422);
+            }
+
+            $payload = $this->normalizePayload($request->except("file"));
             $payload["method"] = $method;
 
             if ($method === "submitPrestasi" && $request->hasFile("file")) {
@@ -61,42 +68,22 @@ class RewardApiController extends Controller
 
                 $jenis = trim((string) $request->input("jenis_prestasi", ""));
                 $ket = trim((string) $request->input("keterangan", ""));
-                $payload["url"] = $this->storeUploadFile($file, $nocust, $jenis, $ket);
+                $stored = $this->storeUploadFile($file, $nocust, $jenis, $ket);
 
-                $response = Http::connectTimeout(5)
-                    ->timeout(20)
-                    ->retry(1, 150)
-                    ->asForm()
-                    ->acceptJson()
-                    ->post($wsUrl, $payload);
-            } elseif ($request->hasFile("file")) {
-                $file = $request->file("file");
-                if ($file === null || !$file->isValid()) {
-                    return response()->json([
-                        "status" => 422,
-                        "message" => "File upload tidak valid",
-                    ], 422);
-                }
-
-                foreach ($payload as $key => $value) {
-                    if ($value !== null) {
-                        $payload[$key] = (string) $value;
-                    }
-                }
+                $payload["url"] = $stored["url"];
+                $payload["token"] = $token;
+                $payload["jenis_prestasi"] = $jenis;
+                $payload["keterangan"] = $ket;
+                $payload["nilai_penghargaan"] = trim((string) $request->input("nilai_penghargaan", ""));
+                $payload["tahun_akademik"] = trim((string) $request->input("tahun_akademik", ""));
 
                 $response = Http::connectTimeout(5)
                     ->timeout(20)
                     ->retry(1, 150)
                     ->asMultipart()
-                    ->attach(
-                        "file",
-                        file_get_contents($file->getRealPath()),
-                        $file->getClientOriginalName()
-                    )
+                    ->attach("file", fopen($stored["path"], "r"), $stored["name"])
                     ->post($wsUrl, $payload);
             } else {
-                $payload["method"] = $method;
-
                 $response = Http::connectTimeout(5)
                     ->timeout(20)
                     ->retry(1, 150)
@@ -128,7 +115,10 @@ class RewardApiController extends Controller
         }
     }
 
-    private function storeUploadFile(UploadedFile $file, string $nocust, string $jenis, string $ket): string
+  /**
+   * @return array{path: string, name: string, url: string}
+   */
+    private function storeUploadFile(UploadedFile $file, string $nocust, string $jenis, string $ket): array
     {
         if ($file->getSize() > 2 * 1024 * 1024) {
             throw new RuntimeException("Ukuran file maksimal 2MB");
@@ -144,11 +134,6 @@ class RewardApiController extends Controller
             throw new RuntimeException("Tipe file tidak valid");
         }
 
-        $folder = public_path("uploads/" . $nocust);
-        if (!is_dir($folder) && !mkdir($folder, 0755, true) && !is_dir($folder)) {
-            throw new RuntimeException("Gagal membuat folder upload: " . $folder);
-        }
-
         $base = $this->slugify($jenis) . "_" . $this->slugify($ket);
         $base = trim($base, "_");
         if ($base === "") {
@@ -156,9 +141,30 @@ class RewardApiController extends Controller
         }
 
         $fileName = $base . "_" . time() . "." . $ext;
-        $file->move($folder, $fileName);
+        $folder = public_path("uploads/" . $nocust);
+        if (!is_dir($folder) && !mkdir($folder, 0755, true) && !is_dir($folder)) {
+            throw new RuntimeException("Gagal membuat folder upload: " . $folder);
+        }
 
-        return url("uploads/" . $nocust . "/" . $fileName);
+        $file->move($folder, $fileName);
+        $fullPath = $folder . DIRECTORY_SEPARATOR . $fileName;
+
+        return [
+            "path" => $fullPath,
+            "name" => $fileName,
+            "url"  => url("uploads/" . $nocust . "/" . $fileName),
+        ];
+    }
+
+    private function normalizePayload(array $payload): array
+    {
+        $normalized = [];
+        foreach ($payload as $key => $value) {
+            if (is_scalar($value) || $value === null) {
+                $normalized[$key] = (string) $value;
+            }
+        }
+        return $normalized;
     }
 
     private function slugify(string $value): string
