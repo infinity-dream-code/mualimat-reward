@@ -445,6 +445,13 @@ try {
         exit;
     }
 
+    if ($method === "getTahunAkademik") {
+        $data = doGetTahunAkademik();
+        http_response_code(200);
+        echo json_encode(["status" => 200, "data" => $data], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
     $token = null;
     if (isset($req["token"]) && is_string($req["token"]) && $req["token"] !== "") {
         $token = $req["token"];
@@ -470,13 +477,6 @@ try {
         if (is_object($decoded)) $decoded = (array) $decoded;
     } catch (Throwable $e) {
         fail(401, "Token JWT tidak valid");
-    }
-
-    if ($method === "getTahunAkademik") {
-        $data = doGetTahunAkademik();
-        http_response_code(200);
-        echo json_encode(["status" => 200, "data" => $data], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-        exit;
     }
 
     if ($method === "submitPrestasi") {

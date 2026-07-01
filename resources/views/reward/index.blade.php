@@ -97,6 +97,8 @@
         input[type="number"],
         select,
         textarea {
+            appearance: auto;
+            -webkit-appearance: menulist;
             width: 100%;
             padding: 0.7rem 0.85rem;
             border: 1.5px solid var(--gray-200);
@@ -234,7 +236,7 @@
             </div>
 
             <h2>Data Prestasi</h2>
-            <form id="prestasiForm">
+            <form id="prestasiForm" autocomplete="off">
                 <div class="form-group">
                     <label for="jenis_prestasi">Jenis Prestasi <span>*</span></label>
                     <input type="text" id="jenis_prestasi" name="jenis_prestasi" required placeholder="Contoh: Olimpiade Matematika">
@@ -249,8 +251,11 @@
                 </div>
                 <div class="form-group">
                     <label for="tahun_akademik">Tahun Akademik <span>*</span></label>
-                    <select id="tahun_akademik" name="tahun_akademik" required>
+                    <select id="tahun_akademik" name="tahun_akademik" required autocomplete="off">
                         <option value="">Pilih tahun akademik</option>
+                        @foreach ($tahunAkademik as $thn)
+                            <option value="{{ $thn }}">{{ $thn }}</option>
+                        @endforeach
                     </select>
                 </div>
                 <div class="form-group">
@@ -307,7 +312,10 @@
             document.getElementById('userName').textContent = session.nmcust || '-';
             document.getElementById('userInfo').textContent =
                 'No: ' + (session.nocust || '-') + ' | Kelas: ' + (session.kelas || '-');
-            loadTahunAkademik(session.token);
+            const select = document.getElementById('tahun_akademik');
+            if (select.options.length <= 1) {
+                loadTahunAkademik();
+            }
         }
 
         function showLoginForm() {
@@ -388,7 +396,7 @@
             }
         }
 
-        async function loadTahunAkademik(token) {
+        async function loadTahunAkademik() {
             const cached = getCachedTahunAkademik();
             if (cached.length > 0) {
                 fillTahunAkademikOptions(cached);
@@ -399,7 +407,7 @@
             select.innerHTML = '<option value="">Memuat data...</option>';
 
             try {
-                const response = await callWs({ method: 'getTahunAkademik', token });
+                const response = await callWs({ method: 'getTahunAkademik' });
                 const list = response?.data?.tahun_akademik || [];
                 setCachedTahunAkademik(list);
 

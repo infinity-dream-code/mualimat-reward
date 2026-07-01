@@ -1,5 +1,6 @@
 <?php
 
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/', function () {
@@ -24,8 +25,26 @@ Route::get('/', function () {
 
     $wsUrl = url('/api/reward');
 
+    $tahunAkademik = [];
+    try {
+        $response = Http::connectTimeout(5)
+            ->timeout(15)
+            ->asForm()
+            ->post($wsUrl, ['method' => 'getTahunAkademik']);
+        $json = $response->json();
+        if (is_array($json) && ($json['status'] ?? 0) === 200) {
+            $list = $json['data']['tahun_akademik'] ?? [];
+            if (is_array($list)) {
+                $tahunAkademik = $list;
+            }
+        }
+    } catch (\Throwable) {
+        // dropdown tetap tampil kosong, user bisa refresh halaman
+    }
+
     return view('reward.index', [
-        'wsUrl'   => $wsUrl,
-        'logoUrl' => $logoUrl,
+        'wsUrl'         => $wsUrl,
+        'logoUrl'       => $logoUrl,
+        'tahunAkademik' => $tahunAkademik,
     ]);
 });
