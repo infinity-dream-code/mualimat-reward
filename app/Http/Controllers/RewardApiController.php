@@ -46,7 +46,9 @@ class RewardApiController extends Controller
                     $payload["method"] = $method;
                 }
 
-                $response = Http::timeout(30)
+                $response = Http::connectTimeout(5)
+                    ->timeout(20)
+                    ->retry(1, 150)
                     ->asMultipart()
                     ->attach(
                         "file",
@@ -58,7 +60,10 @@ class RewardApiController extends Controller
                 $payload = $request->all();
                 $payload["method"] = $method;
 
-                $response = Http::timeout(30)
+                $response = Http::connectTimeout(5)
+                    ->timeout(20)
+                    ->retry(1, 150)
+                    ->asForm()
                     ->acceptJson()
                     ->post($wsUrl, $payload);
             }

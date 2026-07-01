@@ -249,7 +249,9 @@
                 </div>
                 <div class="form-group">
                     <label for="tahun_akademik">Tahun Akademik <span>*</span></label>
-                    <input type="text" id="tahun_akademik" name="tahun_akademik" required placeholder="Contoh: 2025/2026">
+                    <select id="tahun_akademik" name="tahun_akademik" required>
+                        <option value="">Pilih tahun akademik</option>
+                    </select>
                 </div>
                 <div class="form-group">
                     <label for="file">Upload Bukti (PNG/JPG/PDF) <span>*</span></label>
@@ -264,6 +266,7 @@
     <script>
         const WS_URL = @json($wsUrl);
         const STORAGE_KEY = 'mualimat_reward_session';
+        const TAHUN_STORAGE_KEY = 'mualimat_reward_tahun_akademik';
 
         const loginSection = document.getElementById('loginSection');
         const prestasiSection = document.getElementById('prestasiSection');
@@ -304,6 +307,7 @@
             document.getElementById('userName').textContent = session.nmcust || '-';
             document.getElementById('userInfo').textContent =
                 'No: ' + (session.nocust || '-') + ' | Kelas: ' + (session.kelas || '-');
+            loadTahunAkademik(session.token);
         }
 
         function showLoginForm() {
@@ -352,6 +356,61 @@
             }
 
             return data;
+        }
+
+        function fillTahunAkademikOptions(list, placeholder = 'Pilih tahun akademik') {
+            const select = document.getElementById('tahun_akademik');
+            select.innerHTML = `<option value="">${placeholder}</option>`;
+            if (!Array.isArray(list) || list.length === 0) {
+                return false;
+            }
+            for (const item of list) {
+                const opt = document.createElement('option');
+                opt.value = item;
+                opt.textContent = item;
+                select.appendChild(opt);
+            }
+            return true;
+        }
+
+        function getCachedTahunAkademik() {
+            try {
+                const parsed = JSON.parse(sessionStorage.getItem(TAHUN_STORAGE_KEY) || '[]');
+                return Array.isArray(parsed) ? parsed : [];
+            } catch {
+                return [];
+            }
+        }
+
+        function setCachedTahunAkademik(list) {
+            if (Array.isArray(list) && list.length > 0) {
+                sessionStorage.setItem(TAHUN_STORAGE_KEY, JSON.stringify(list));
+            }
+        }
+
+        async function loadTahunAkademik(token) {
+            const cached = getCachedTahunAkademik();
+            if (cached.length > 0) {
+                fillTahunAkademikOptions(cached);
+                return;
+            }
+
+            const select = document.getElementById('tahun_akademik');
+            select.innerHTML = '<option value="">Memuat data...</option>';
+
+            try {
+                const response = await callWs({ method: 'getTahunAkademik', token });
+                const list = response?.data?.tahun_akademik || [];
+                setCachedTahunAkademik(list);
+
+                if (!fillTahunAkademikOptions(list)) {
+                    select.innerHTML = '<option value="">Data tahun akademik kosong</option>';
+                    return;
+                }
+            } catch (err) {
+                select.innerHTML = '<option value="">Gagal memuat tahun akademik</option>';
+                showAlert(err.message || 'Gagal memuat data tahun akademik');
+            }
         }
 
         loginForm.addEventListener('submit', async (e) => {
