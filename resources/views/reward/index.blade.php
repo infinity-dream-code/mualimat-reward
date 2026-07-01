@@ -332,7 +332,12 @@
             const data = await res.json().catch(() => ({}));
 
             if (!res.ok || data.status !== 200) {
-                throw new Error(data.message || 'Permintaan gagal');
+                let detail = data.message || 'Permintaan gagal';
+                if (data.raw) {
+                    const raw = String(data.raw).replace(/\s+/g, ' ').trim();
+                    detail += ' | RAW: ' + raw.slice(0, 180);
+                }
+                throw new Error(detail);
             }
 
             return data;
