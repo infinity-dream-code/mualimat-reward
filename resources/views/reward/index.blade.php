@@ -335,7 +335,7 @@
                 throw new Error(data.message || 'Permintaan gagal');
             }
 
-            return data.data;
+            return data;
         }
 
         loginForm.addEventListener('submit', async (e) => {
@@ -348,7 +348,11 @@
                 const username = document.getElementById('username').value.trim();
                 const password = document.getElementById('password').value;
 
-                const data = await callWs({ method: 'login', username, password });
+                const response = await callWs({ method: 'login', username, password });
+                const data = response?.data;
+                if (!data || !data.token) {
+                    throw new Error(response?.message || 'Respons login WS tidak lengkap (token tidak ada)');
+                }
                 const session = {
                     token: data.token,
                     custid: data.custid,
@@ -409,7 +413,10 @@
                 formData.append('tahun_akademik', document.getElementById('tahun_akademik').value.trim());
                 formData.append('file', file);
 
-                await callWs(formData, true);
+                const response = await callWs(formData, true);
+                if (!response?.data) {
+                    throw new Error(response?.message || 'Respons submit WS tidak lengkap');
+                }
                 prestasiForm.reset();
                 showAlert('Prestasi berhasil dikirim dan menunggu persetujuan.', 'success');
             } catch (err) {
