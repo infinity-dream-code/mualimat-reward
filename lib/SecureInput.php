@@ -180,17 +180,15 @@ function secure_validate_text_field(string $value, int $maxLength, int $minLengt
 
 function secure_validate_nilai_penghargaan(string $value): ?string
 {
-    $value = trim($value);
+    $value = trim(str_replace(',', '.', $value));
     if ($value === '') {
-        return '';
+        return '0.00';
     }
-    if (strlen($value) > 100) {
+    if (!preg_match('/^\d{1,13}(\.\d{1,2})?$/', $value)) {
         return null;
     }
-    if (!preg_match('/^[a-zA-Z0-9\s.,/+-]+$/u', $value)) {
-        return null;
-    }
-    return $value;
+
+    return number_format((float) $value, 2, '.', '');
 }
 
 function secure_validate_tahun_akademik(string $value): ?string

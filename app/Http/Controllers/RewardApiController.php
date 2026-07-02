@@ -113,7 +113,7 @@ class RewardApiController extends Controller
 
         $nilai = secure_validate_nilai_penghargaan((string) $request->input('nilai_penghargaan', ''));
         if ($nilai === null) {
-            throw new InvalidArgumentException('Nilai penghargaan tidak valid.');
+            throw new InvalidArgumentException('Nilai penghargaan harus angka (maks. 2 desimal).');
         }
 
         $tahun = secure_validate_tahun_akademik((string) $request->input('tahun_akademik', ''));

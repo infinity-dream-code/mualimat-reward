@@ -247,7 +247,8 @@
                 </div>
                 <div class="form-group">
                     <label for="nilai_penghargaan">Nilai Penghargaan</label>
-                    <input type="text" id="nilai_penghargaan" name="nilai_penghargaan" maxlength="100" placeholder="Contoh: Juara 1 / Emas" pattern="[a-zA-Z0-9\s.,/+-]*" title="Hanya huruf, angka, spasi, dan tanda . , / + -">
+                    <input type="number" id="nilai_penghargaan" name="nilai_penghargaan" min="0" step="0.01" placeholder="Contoh: 85 atau 85.50">
+                    <p class="file-hint">Opsional. Kosongkan jika tidak ada — akan disimpan sebagai 0.</p>
                 </div>
                 <div class="form-group">
                     <label for="tahun_akademik">Tahun Akademik <span>*</span></label>
@@ -431,8 +432,11 @@
             if (!keterangan || keterangan.length > 500 || /<[^>]*>/.test(keterangan)) {
                 return 'Keterangan tidak valid.';
             }
-            if (nilai && (nilai.length > 100 || !/^[a-zA-Z0-9\s.,/+-]+$/.test(nilai))) {
-                return 'Nilai penghargaan tidak valid.';
+            if (nilai !== '' && !/^\d+(\.\d{1,2})?$/.test(nilai)) {
+                return 'Nilai penghargaan harus angka (maks. 2 desimal).';
+            }
+            if (nilai !== '' && Number(nilai) < 0) {
+                return 'Nilai penghargaan tidak boleh negatif.';
             }
             if (!/^\d{4}\/\d{4}$/.test(tahun)) {
                 return 'Tahun akademik tidak valid.';
