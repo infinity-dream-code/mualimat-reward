@@ -1,6 +1,7 @@
 <?php
 error_reporting(E_ALL);
-ini_set("display_errors", 1);
+ini_set("display_errors", "0");
+ini_set("log_errors", "1");
 date_default_timezone_set("Asia/Jakarta");
 
 $libDb = __DIR__ . "/lib/DbClass.php";
@@ -23,26 +24,28 @@ if (file_exists($libDb) && file_exists($libConn) && file_exists($libJwt)) {
     header("Content-Type: application/json; charset=utf-8");
     echo json_encode([
         "status" => 500,
-        "message" => "Dependency WS tidak lengkap: butuh lib/* atau config/*",
+        "message" => "Konfigurasi server belum lengkap",
     ], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
-function writeLog($data): void
-{
-    $line = "[" . date("Y-m-d H:i:s") . "] ";
-    $line .= is_array($data) || is_object($data)
-        ? json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
-        : (string) $data;
-    file_put_contents(__DIR__ . "/error.log", $line . "\n", FILE_APPEND);
+$secureInput = __DIR__ . "/lib/SecureInput.php";
+if (!file_exists($secureInput)) {
+    http_response_code(500);
+    header("Content-Type: application/json; charset=utf-8");
+    echo json_encode([
+        "status" => 500,
+        "message" => "Konfigurasi server belum lengkap",
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
 }
+require_once $secureInput;
 
 function loadEnv(string $path): void
 {
     if (!file_exists($path)) {
-        writeLog(["level" => "ERROR", "event" => "ENV_NOT_FOUND", "path" => $path]);
         http_response_code(500);
-        echo json_encode(["status" => 500, "message" => "ENV tidak ditemukan"], JSON_UNESCAPED_UNICODE);
+        echo json_encode(["status" => 500, "message" => "Konfigurasi server belum lengkap"], JSON_UNESCAPED_UNICODE);
         exit;
     }
 
@@ -84,21 +87,8 @@ function dbConnectPdo(): PDO
     $name = (string) ($_ENV["DB_DATABASE"] ?? "");
 
     if ($host === "" || $user === "" || $name === "") {
-        throw new RuntimeException("ENV_DB_INCOMPLETE");
+        throw new RuntimeException("DB_UNAVAILABLE");
     }
-
-    $resolvedHost = gethostbyname($host);
-    writeLog([
-        "level" => "INFO",
-        "event" => "DB_CONNECT_ATTEMPT",
-        "host" => $host,
-        "resolved_host" => $resolvedHost,
-        "port" => $port,
-        "database" => $name,
-        "username" => $user,
-        "password_masked" => str_repeat("*", min(strlen($pass), 12)),
-        "password_len" => strlen($pass),
-    ]);
 
     try {
         $conn = new conn();
@@ -109,59 +99,17 @@ function dbConnectPdo(): PDO
             "port" => $port,
             "name" => $name,
         ]);
-    } catch (Throwable $e) {
-        writeLog([
-            "level" => "ERROR",
-            "event" => "DB_CONNECT_FAIL",
-            "host" => $host,
-            "resolved_host" => $resolvedHost,
-            "port" => $port,
-            "database" => $name,
-            "username" => $user,
-            "password_masked" => str_repeat("*", min(strlen($pass), 12)),
-            "password_len" => strlen($pass),
-            "error" => $e->getMessage(),
-        ]);
-        throw new RuntimeException("DB_CONNECT_FAIL: " . $e->getMessage());
+    } catch (Throwable) {
+        throw new RuntimeException("DB_UNAVAILABLE");
     }
 
     if (!$pdo instanceof PDO) {
-        throw new RuntimeException("DBConnect tidak mengembalikan PDO");
+        throw new RuntimeException("DB_UNAVAILABLE");
     }
 
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
     return $pdo;
-}
-
-function getTableColumns(PDO $pdo, string $table): array
-{
-    $stmt = $pdo->prepare("DESCRIBE `$table`");
-    $stmt->execute();
-    $rows = $stmt->fetchAll();
-    $cols = [];
-    foreach ($rows as $r) {
-        if (isset($r["Field"])) $cols[] = (string) $r["Field"];
-    }
-    return $cols;
-}
-
-function pickColumn(array $cols, array $candidates): ?string
-{
-    $lowerMap = [];
-    foreach ($cols as $c) $lowerMap[strtolower($c)] = $c;
-    foreach ($candidates as $cand) {
-        $k = strtolower($cand);
-        if (isset($lowerMap[$k])) return $lowerMap[$k];
-    }
-    return null;
-}
-
-function slugify(string $s): string
-{
-    $s = strtolower(trim($s));
-    $s = preg_replace('/[^a-z0-9]+/', '_', $s);
-    return trim($s, '_');
 }
 
 function buildPublicFileUrl(string $relativePath): string
@@ -190,6 +138,11 @@ function fail(int $code, string $message): void
     http_response_code($code);
     echo json_encode(["status" => $code, "message" => $message], JSON_UNESCAPED_UNICODE);
     exit;
+}
+
+function failSystem(int $code = 500): void
+{
+    fail($code, "Terjadi kesalahan sistem. Silakan coba lagi.");
 }
 
 function verifyPassword(string $password, string $stored): bool
@@ -221,24 +174,16 @@ function verifyPassword(string $password, string $stored): bool
 
 function doLogin(array $req): array
 {
-    $username = trim((string) ($req["username"] ?? ""));
-    $password = trim((string) ($req["password"] ?? ""));
+    $username = secure_validate_username((string) ($req["username"] ?? ""));
+    $password = secure_validate_password((string) ($req["password"] ?? ""));
 
-    if ($username === "" || $password === "") {
-        fail(422, "Username dan password wajib diisi");
+    if ($username === null || $password === null) {
+        fail(422, "Username atau password tidak valid");
     }
 
     $pdo = dbConnectPdo();
 
-    $userCols = getTableColumns($pdo, "sm_user");
-    $usernameCol = pickColumn($userCols, ["userlogin", "username", "user_name", "login", "userid"]);
-    $passwordCol = pickColumn($userCols, ["kunci", "password", "passwd", "pwd"]);
-
-    if ($usernameCol === null || $passwordCol === null) {
-        throw new RuntimeException("Kolom login tidak ditemukan di sm_user");
-    }
-
-    $stmt = $pdo->prepare("SELECT * FROM `sm_user` WHERE `$usernameCol` = :username LIMIT 1");
+    $stmt = $pdo->prepare("SELECT * FROM `sm_user` WHERE `userlogin` = :username LIMIT 1");
     $stmt->bindValue(":username", $username, PDO::PARAM_STR);
     $stmt->execute();
     $user = $stmt->fetch();
@@ -247,11 +192,11 @@ function doLogin(array $req): array
         fail(401, "Username atau password salah");
     }
 
-    if (!verifyPassword($password, (string) $user[$passwordCol])) {
+    if (!verifyPassword($password, (string) ($user["kunci"] ?? ""))) {
         fail(401, "Username atau password salah");
     }
 
-    $nocust = trim((string) $user[$usernameCol]);
+    $nocust = trim((string) ($user["userlogin"] ?? ""));
 
     $custStmt = $pdo->prepare("
         SELECT CUSTID AS custid, NOCUST AS nocust, NMCUST AS nmcust, DESC02 AS kelas
@@ -271,7 +216,7 @@ function doLogin(array $req): array
     $jwt = new JWT();
     $key = (string) ($_ENV["JWT_KEY"] ?? "");
     if ($key === "") {
-        throw new RuntimeException("JWT_KEY belum di set");
+        throw new RuntimeException("CONFIG_ERROR");
     }
 
     $payload = [
@@ -300,24 +245,17 @@ function saveUploadedFile(string $nocust, string $jenisPrestasi, string $keteran
     }
 
     $file = $_FILES["file"];
-    $maxSize = 2 * 1024 * 1024;
-    if ($file["size"] > $maxSize) {
-        fail(422, "Ukuran file maksimal 2MB");
+    $inspected = secure_inspect_upload(
+        (string) $file["tmp_name"],
+        (string) ($file["name"] ?? ""),
+        (int) ($file["size"] ?? 0)
+    );
+    if (!$inspected["valid"]) {
+        fail(422, $inspected["error"] !== "" ? $inspected["error"] : "File upload tidak valid");
     }
 
-    $allowedExt = ["png", "jpg", "jpeg", "pdf"];
-    $ext = strtolower(pathinfo($file["name"], PATHINFO_EXTENSION));
-    if (!in_array($ext, $allowedExt, true)) {
-        fail(422, "Format file harus png/jpg/jpeg/pdf");
-    }
-
-    $finfo = finfo_open(FILEINFO_MIME_TYPE);
-    $mime = finfo_file($finfo, $file["tmp_name"]);
-    finfo_close($finfo);
-
-    $allowedMime = ["image/png", "image/jpeg", "application/pdf"];
-    if (!in_array($mime, $allowedMime, true)) {
-        fail(422, "Tipe file tidak valid");
+    if (!secure_validate_nocust($nocust)) {
+        fail(422, "Data upload tidak valid");
     }
 
     $uploadRoot = trim((string) ($_ENV["UPLOAD_ABS_PATH"] ?? ""));
@@ -329,22 +267,18 @@ function saveUploadedFile(string $nocust, string $jenisPrestasi, string $keteran
     $folder = $uploadRoot . "/" . $nocust;
     if (!is_dir($folder)) {
         if (!mkdir($folder, 0755, true) && !is_dir($folder)) {
-            throw new RuntimeException("Gagal membuat folder upload: " . $folder);
+            throw new RuntimeException("UPLOAD_DIR_ERROR");
         }
     }
     if (!is_writable($folder)) {
-        throw new RuntimeException("Folder upload tidak bisa ditulis: " . $folder);
+        throw new RuntimeException("UPLOAD_DIR_ERROR");
     }
 
-    $baseName = slugify($jenisPrestasi) . "_" . slugify($keterangan);
-    if ($baseName === "_" || $baseName === "") {
-        $baseName = "prestasi";
-    }
-    $fileName = $baseName . "_" . time() . "." . $ext;
+    $fileName = secure_build_upload_filename($jenisPrestasi, $keterangan, $inspected["ext"]);
     $target = $folder . "/" . $fileName;
 
     if (!move_uploaded_file($file["tmp_name"], $target)) {
-        throw new RuntimeException("Gagal menyimpan file upload");
+        throw new RuntimeException("UPLOAD_SAVE_ERROR");
     }
 
     $urlPrefix = trim((string) ($_ENV["UPLOAD_URL_PREFIX"] ?? "/uploads"));
@@ -352,33 +286,84 @@ function saveUploadedFile(string $nocust, string $jenisPrestasi, string $keteran
     return buildPublicFileUrl($relativePath);
 }
 
+function validatePrestasiInput(array $req): array
+{
+    $jenis = secure_validate_text_field((string) ($req["jenis_prestasi"] ?? ""), 150);
+    $keterangan = secure_validate_text_field((string) ($req["keterangan"] ?? ""), 500);
+    $nilai = secure_validate_nilai_penghargaan((string) ($req["nilai_penghargaan"] ?? ""));
+    $tahun = secure_validate_tahun_akademik((string) ($req["tahun_akademik"] ?? ($req["bta"] ?? "")));
+
+    if ($jenis === null || $keterangan === null || $tahun === null) {
+        fail(422, "Data prestasi tidak valid");
+    }
+    if ($nilai === null) {
+        fail(422, "Nilai penghargaan tidak valid");
+    }
+
+    return [
+        "jenis_prestasi" => $jenis,
+        "keterangan" => $keterangan,
+        "nilai_penghargaan" => $nilai,
+        "tahun_akademik" => $tahun,
+    ];
+}
+
+function assertTahunAkademikExists(PDO $pdo, string $tahun): void
+{
+    $stmt = $pdo->prepare("SELECT 1 FROM mst_thn_aka WHERE thn_aka = :tahun LIMIT 1");
+    $stmt->bindValue(":tahun", $tahun, PDO::PARAM_STR);
+    $stmt->execute();
+    if (!$stmt->fetchColumn()) {
+        fail(422, "Tahun akademik tidak valid");
+    }
+}
+
+function allowedUploadHosts(): array
+{
+    $hosts = [];
+    $base = trim((string) ($_ENV["PUBLIC_BASE_URL"] ?? ""));
+    if ($base !== "") {
+        $host = parse_url($base, PHP_URL_HOST);
+        if (is_string($host) && $host !== "") {
+            $hosts[] = $host;
+        }
+    }
+    $laravel = trim((string) ($_ENV["LARAVEL_APP_URL"] ?? ""));
+    if ($laravel !== "") {
+        $host = parse_url($laravel, PHP_URL_HOST);
+        if (is_string($host) && $host !== "") {
+            $hosts[] = $host;
+        }
+    }
+    return array_values(array_unique($hosts));
+}
+
 function doSubmitPrestasi(array $req, array $auth): array
 {
-    $jenisPrestasi    = trim((string) ($req["jenis_prestasi"] ?? ""));
-    $keterangan       = trim((string) ($req["keterangan"] ?? ""));
-    $nilaiPenghargaan = trim((string) ($req["nilai_penghargaan"] ?? ""));
-    $tahunAkademik    = trim((string) ($req["tahun_akademik"] ?? ($req["bta"] ?? "")));
-
-    if ($jenisPrestasi === "" || $keterangan === "" || $tahunAkademik === "") {
-        fail(422, "Jenis prestasi, keterangan, dan tahun akademik wajib diisi");
-    }
+    $fields = validatePrestasiInput($req);
 
     $custId = (string) ($auth["custid"] ?? "");
     $nocust = (string) ($auth["nocust"] ?? "");
     $nmcust = (string) ($auth["nmcust"] ?? "");
     $kelas  = (string) ($auth["kelas"] ?? "");
 
-    if ($custId === "" || $nocust === "") {
+    if ($custId === "" || $nocust === "" || !secure_validate_nocust($nocust)) {
         fail(401, "Sesi tidak valid, silakan login ulang");
     }
 
-    // Laravel sudah simpan file & kirim URL penuh; WS tidak perlu upload ulang
+    $pdo = dbConnectPdo();
+    assertTahunAkademikExists($pdo, $fields["tahun_akademik"]);
+
     $url = trim((string) ($req["url"] ?? ""));
-    if ($url === "") {
-        $url = saveUploadedFile($nocust, $jenisPrestasi, $keterangan);
+    if ($url !== "") {
+        $hosts = allowedUploadHosts();
+        if ($hosts === [] || !secure_validate_upload_url($url, $hosts)) {
+            fail(422, "URL bukti tidak valid");
+        }
+    } else {
+        $url = saveUploadedFile($nocust, $fields["jenis_prestasi"], $fields["keterangan"]);
     }
 
-    $pdo = dbConnectPdo();
     $sql = "
         INSERT INTO aka_reward
             (custid, nocust, nmcust, kelas, jenis_prestasi, keterangan, nilai_penghargaan, bta, url, isapproved, approveddate, approvedby, created_at, updated_at)
@@ -390,10 +375,10 @@ function doSubmitPrestasi(array $req, array $auth): array
     $stmt->bindValue(":nocust", $nocust, PDO::PARAM_STR);
     $stmt->bindValue(":nmcust", $nmcust, PDO::PARAM_STR);
     $stmt->bindValue(":kelas", $kelas, PDO::PARAM_STR);
-    $stmt->bindValue(":jenis", $jenisPrestasi, PDO::PARAM_STR);
-    $stmt->bindValue(":keterangan", $keterangan, PDO::PARAM_STR);
-    $stmt->bindValue(":nilai", $nilaiPenghargaan, PDO::PARAM_STR);
-    $stmt->bindValue(":bta", $tahunAkademik, PDO::PARAM_STR);
+    $stmt->bindValue(":jenis", $fields["jenis_prestasi"], PDO::PARAM_STR);
+    $stmt->bindValue(":keterangan", $fields["keterangan"], PDO::PARAM_STR);
+    $stmt->bindValue(":nilai", $fields["nilai_penghargaan"], PDO::PARAM_STR);
+    $stmt->bindValue(":bta", $fields["tahun_akademik"], PDO::PARAM_STR);
     $stmt->bindValue(":url", $url, PDO::PARAM_STR);
     $stmt->execute();
 
@@ -442,8 +427,10 @@ try {
         $req = $_POST;
     }
 
-    $method = trim((string) ($req["method"] ?? ""));
-    if ($method === "") $method = "login";
+    $method = secure_validate_method(trim((string) ($req["method"] ?? "")));
+    if ($method === null) {
+        fail(422, "Permintaan tidak valid");
+    }
 
     if ($method === "login") {
         $data = doLogin($req);
@@ -469,14 +456,14 @@ try {
         }
     }
 
-    if (!$token) {
+    if (!$token || !secure_validate_token_format($token)) {
         fail(401, "Token wajib diisi");
     }
 
     $jwt = new JWT();
     $key = (string) ($_ENV["JWT_KEY"] ?? "");
     if ($key === "") {
-        fail(500, "JWT_KEY belum di set");
+        failSystem(500);
     }
 
     try {
@@ -493,18 +480,7 @@ try {
         exit;
     }
 
-    fail(422, "Metode '$method' tidak valid");
-} catch (Throwable $e) {
-    writeLog([
-        "level" => "ERROR",
-        "event" => "EXCEPTION",
-        "type" => get_class($e),
-        "message" => $e->getMessage(),
-        "file" => $e->getFile(),
-        "line" => $e->getLine()
-    ]);
-
-    http_response_code(500);
-    echo json_encode(["status" => 500, "message" => "Terjadi kesalahan: " . $e->getMessage()], JSON_UNESCAPED_UNICODE);
-    exit;
+    fail(422, "Permintaan tidak valid");
+} catch (Throwable) {
+    failSystem(500);
 }

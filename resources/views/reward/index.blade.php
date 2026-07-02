@@ -215,11 +215,11 @@
             <form id="loginForm">
                 <div class="form-group">
                     <label for="username">Username <span>*</span></label>
-                    <input type="text" id="username" name="username" autocomplete="username" required>
+                    <input type="text" id="username" name="username" autocomplete="username" required maxlength="50" pattern="[a-zA-Z0-9._@-]+" title="Hanya huruf, angka, titik, underscore, @ dan strip">
                 </div>
                 <div class="form-group">
                     <label for="password">Password <span>*</span></label>
-                    <input type="password" id="password" name="password" autocomplete="current-password" required>
+                    <input type="password" id="password" name="password" autocomplete="current-password" required maxlength="128">
                 </div>
                 <button type="submit" class="btn btn-primary" id="loginBtn">Masuk</button>
             </form>
@@ -239,15 +239,15 @@
             <form id="prestasiForm" autocomplete="off">
                 <div class="form-group">
                     <label for="jenis_prestasi">Jenis Prestasi <span>*</span></label>
-                    <input type="text" id="jenis_prestasi" name="jenis_prestasi" required placeholder="Contoh: Olimpiade Matematika">
+                    <input type="text" id="jenis_prestasi" name="jenis_prestasi" required maxlength="150" placeholder="Contoh: Olimpiade Matematika">
                 </div>
                 <div class="form-group">
                     <label for="keterangan">Keterangan <span>*</span></label>
-                    <textarea id="keterangan" name="keterangan" required placeholder="Deskripsi prestasi yang diraih"></textarea>
+                    <textarea id="keterangan" name="keterangan" required maxlength="500" placeholder="Deskripsi prestasi yang diraih"></textarea>
                 </div>
                 <div class="form-group">
                     <label for="nilai_penghargaan">Nilai Penghargaan</label>
-                    <input type="text" id="nilai_penghargaan" name="nilai_penghargaan" placeholder="Contoh: Juara 1 / Emas">
+                    <input type="text" id="nilai_penghargaan" name="nilai_penghargaan" maxlength="100" placeholder="Contoh: Juara 1 / Emas" pattern="[a-zA-Z0-9\s.,/+-]*" title="Hanya huruf, angka, spasi, dan tanda . , / + -">
                 </div>
                 <div class="form-group">
                     <label for="tahun_akademik">Tahun Akademik <span>*</span></label>
@@ -338,7 +338,7 @@
             try {
                 res = await fetch(WS_URL, options);
             } catch (err) {
-                throw new Error('Tidak dapat terhubung ke server API aplikasi (/api/reward). Cek koneksi domain dan cache Laravel.');
+                throw new Error('Tidak dapat terhubung ke server. Silakan coba lagi.');
             }
 
             const responseText = await res.text();
@@ -348,19 +348,12 @@
             } catch (e) {
                 data = {
                     status: res.status || 500,
-                    message: 'Respons API bukan JSON',
-                    raw: responseText,
+                    message: 'Respons server tidak valid',
                 };
             }
 
             if (!res.ok || data.status !== 200) {
-                let detail = data.message || 'Permintaan gagal';
-                if (data.raw) {
-                    const raw = String(data.raw).replace(/\s+/g, ' ').trim();
-                    detail += ' | RAW: ' + raw.slice(0, 180);
-                }
-                detail += ` | HTTP: ${res.status}`;
-                throw new Error(detail);
+                throw new Error(data.message || 'Permintaan gagal. Silakan coba lagi.');
             }
 
             return data;
@@ -421,6 +414,57 @@
             }
         }
 
+        function validateLoginInput(username, password) {
+            if (!/^[a-zA-Z0-9._@-]{1,50}$/.test(username)) {
+                return 'Username tidak valid.';
+            }
+            if (!password || password.length > 128) {
+                return 'Password tidak valid.';
+            }
+            return '';
+        }
+
+        function validatePrestasiInput(jenis, keterangan, nilai, tahun, file) {
+            if (!jenis || jenis.length > 150 || /<[^>]*>/.test(jenis)) {
+                return 'Jenis prestasi tidak valid.';
+            }
+            if (!keterangan || keterangan.length > 500 || /<[^>]*>/.test(keterangan)) {
+                return 'Keterangan tidak valid.';
+            }
+            if (nilai && (nilai.length > 100 || !/^[a-zA-Z0-9\s.,/+-]+$/.test(nilai))) {
+                return 'Nilai penghargaan tidak valid.';
+            }
+            if (!/^\d{4}\/\d{4}$/.test(tahun)) {
+                return 'Tahun akademik tidak valid.';
+            }
+            if (!file) {
+                return 'File wajib diupload';
+            }
+            if (file.size > 2 * 1024 * 1024) {
+                return 'Ukuran file maksimal 2 MB';
+            }
+
+            const originalName = (file.name || '').split(/[\\/]/).pop() || '';
+            const lowerName = originalName.toLowerCase();
+            const dangerousExt = ['php','phtml','phar','exe','sh','bat','cmd','js','html','htm','svg','asp','aspx','jsp'];
+            const parts = lowerName.split('.');
+            if (parts.length < 2 || parts.some((part) => dangerousExt.includes(part))) {
+                return 'Nama file tidak valid.';
+            }
+
+            const ext = parts.pop();
+            if (!['png', 'jpg', 'jpeg', 'pdf'].includes(ext)) {
+                return 'Format file harus PNG, JPG, atau PDF';
+            }
+
+            const allowed = ['image/png', 'image/jpeg', 'application/pdf'];
+            if (!allowed.includes(file.type)) {
+                return 'Format file harus PNG, JPG, atau PDF';
+            }
+
+            return '';
+        }
+
         loginForm.addEventListener('submit', async (e) => {
             e.preventDefault();
             hideAlert();
@@ -430,11 +474,15 @@
             try {
                 const username = document.getElementById('username').value.trim();
                 const password = document.getElementById('password').value;
+                const loginError = validateLoginInput(username, password);
+                if (loginError) {
+                    throw new Error(loginError);
+                }
 
                 const response = await callWs({ method: 'login', username, password });
                 const data = response?.data;
                 if (!data || !data.token) {
-                    throw new Error(response?.message || 'Respons login WS tidak lengkap (token tidak ada)');
+                    throw new Error(response?.message || 'Login gagal. Silakan coba lagi.');
                 }
                 const session = {
                     token: data.token,
@@ -468,18 +516,13 @@
 
             const fileInput = document.getElementById('file');
             const file = fileInput.files[0];
-            if (!file) {
-                showAlert('File wajib diupload');
-                return;
-            }
-            if (file.size > 2 * 1024 * 1024) {
-                showAlert('Ukuran file maksimal 2 MB');
-                return;
-            }
-
-            const allowed = ['image/png', 'image/jpeg', 'application/pdf'];
-            if (!allowed.includes(file.type)) {
-                showAlert('Format file harus PNG, JPG, atau PDF');
+            const jenis = document.getElementById('jenis_prestasi').value.trim();
+            const keterangan = document.getElementById('keterangan').value.trim();
+            const nilai = document.getElementById('nilai_penghargaan').value.trim();
+            const tahun = document.getElementById('tahun_akademik').value.trim();
+            const prestasiError = validatePrestasiInput(jenis, keterangan, nilai, tahun, file);
+            if (prestasiError) {
+                showAlert(prestasiError);
                 return;
             }
 
@@ -490,15 +533,15 @@
                 const formData = new FormData();
                 formData.append('method', 'submitPrestasi');
                 formData.append('token', session.token);
-                formData.append('jenis_prestasi', document.getElementById('jenis_prestasi').value.trim());
-                formData.append('keterangan', document.getElementById('keterangan').value.trim());
-                formData.append('nilai_penghargaan', document.getElementById('nilai_penghargaan').value.trim());
-                formData.append('tahun_akademik', document.getElementById('tahun_akademik').value.trim());
+                formData.append('jenis_prestasi', jenis);
+                formData.append('keterangan', keterangan);
+                formData.append('nilai_penghargaan', nilai);
+                formData.append('tahun_akademik', tahun);
                 formData.append('file', file);
 
                 const response = await callWs(formData, true);
                 if (!response?.data) {
-                    throw new Error(response?.message || 'Respons submit WS tidak lengkap');
+                    throw new Error(response?.message || 'Gagal mengirim prestasi. Silakan coba lagi.');
                 }
                 prestasiForm.reset();
                 showAlert('Prestasi berhasil dikirim dan menunggu persetujuan.', 'success');

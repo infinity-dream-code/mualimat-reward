@@ -1,0 +1,8 @@
+# Blok eksekusi script di folder upload
+<FilesMatch "\.(php|phtml|php3|php4|php5|php7|php8|phar|phps|cgi|pl|py|asp|aspx|jsp|sh|bash|exe|dll|js|html?|shtml)$">
+    Require all denied
+</FilesMatch>
+
+Options -Indexes -ExecCGI
+RemoveHandler .php .phtml .php3 .php4 .php5 .php7 .php8 .phar
+RemoveType .php .phtml .php3 .php4 .php5 .php7 .php8 .phar
