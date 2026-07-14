@@ -312,7 +312,7 @@
             prestasiSection.classList.remove('hidden');
             document.getElementById('userName').textContent = session.nmcust || '-';
             document.getElementById('userInfo').textContent =
-                'No: ' + (session.nocust || '-') + ' | Sekolah: ' + (session.kelas || '-');
+                'Sekolah: ' + (session.kelas || '-');
             const select = document.getElementById('tahun_akademik');
             if (select.options.length <= 1) {
                 loadTahunAkademik();
