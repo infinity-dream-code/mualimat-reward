@@ -13,7 +13,7 @@ const SECURE_INPUT_DANGEROUS_EXT = [
     'htaccess', 'ini', 'config', 'shtml', 'war', 'jar',
 ];
 
-const SECURE_INPUT_ALLOWED_METHODS = ['login', 'getTahunAkademik', 'submitPrestasi'];
+const SECURE_INPUT_ALLOWED_METHODS = ['login', 'getTahunAkademik', 'getPrestasiKatalog', 'getPrestasiSaya', 'submitPrestasi'];
 
 function secure_sanitize_basename(string $filename): string
 {
@@ -200,6 +200,65 @@ function secure_validate_tahun_akademik(string $value): ?string
 
     [$start, $end] = array_map('intval', explode('/', $value));
     if ($end !== $start + 1) {
+        return null;
+    }
+
+    return $value;
+}
+
+function secure_validate_semester(string $value): ?string
+{
+    $value = trim($value);
+    return ($value === '1' || $value === '2') ? $value : null;
+}
+
+function secure_validate_nisn(string $value): ?string
+{
+    $value = trim($value);
+    if ($value === '') {
+        return '';
+    }
+    if (!preg_match('/^\d{10}$/', $value)) {
+        return null;
+    }
+
+    return $value;
+}
+
+function secure_validate_positive_id(string $value): ?int
+{
+    $value = trim($value);
+    if (!preg_match('/^[1-9]\d{0,10}$/', $value)) {
+        return null;
+    }
+    $id = (int) $value;
+    return $id > 0 ? $id : null;
+}
+
+function secure_validate_gdrive_url(string $value): ?string
+{
+    $value = trim($value);
+    if ($value === '' || strlen($value) > 500) {
+        return null;
+    }
+    if (preg_match('/[\x00-\x1F\x7F]/', $value)) {
+        return null;
+    }
+
+    $parsed = parse_url($value);
+    if (!is_array($parsed)) {
+        return null;
+    }
+    if (strtolower((string) ($parsed['scheme'] ?? '')) !== 'https') {
+        return null;
+    }
+
+    $host = strtolower((string) ($parsed['host'] ?? ''));
+    if (str_starts_with($host, 'www.')) {
+        $host = substr($host, 4);
+    }
+    $allowed = ['drive.google.com', 'docs.google.com', 'drive.usercontent.google.com'];
+    if (!in_array($host, $allowed, true)) {
         return null;
     }
 

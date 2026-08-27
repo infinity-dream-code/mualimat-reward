@@ -1,0 +1,28 @@
+---
+description: Saat folder ws/ berubah, perbarui dokumentasi API (tabel, method, validasi) di ws/README.md.
+globs: ws/**
+alwaysApply: false
+---
+
+# Dokumentasi folder WS
+
+Setiap kali user menambah, mengganti, atau menarik ulang file di `ws/` (terutama `ws/index.php`, `ws/.env`, `ws/config/`), **wajib memperbarui** `ws/README.md` di turn yang sama.
+
+## Yang harus dicek dan ditulis ulang jika berubah
+
+- Daftar `method` di `SECURE_INPUT_ALLOWED_METHODS`
+- Tabel MySQL yang disentuh (SELECT/INSERT/UPDATE/DELETE/JOIN) beserta **nama kolom** dan arti bisnisnya
+- Relasi antar tabel
+- Field request/response tiap method
+- Aturan validasi, role (`siswa` / `Musrifah` / `superadmin`), JWT payload
+- Variabel env baru (nama saja, **jangan** tulis password / JWT_KEY / isi secret)
+- Aturan upload (ukuran, MIME, path)
+- Kode HTTP / pesan error baru
+- Tanggal “Terakhir diselaraskan” di README
+
+## Larangan
+
+- Jangan menaruh nilai secret dari `ws/.env` ke README
+- Jangan biarkan README ketinggalan dari kode yang baru ditarik
+
+Tulis README dalam bahasa Indonesia, lengkap, dan siap dipakai sebagai kontrak API untuk frontend Laravel.

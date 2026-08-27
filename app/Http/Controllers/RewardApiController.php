@@ -2,24 +2,32 @@
 
 namespace App\Http\Controllers;
 
+use App\Services\WsApiService;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Http\UploadedFile;
-use Illuminate\Support\Facades\Http;
 use InvalidArgumentException;
-use RuntimeException;
 use Throwable;
 
 class RewardApiController extends Controller
 {
+    public function __construct(private readonly WsApiService $ws)
+    {
+    }
+
     public function handle(Request $request): JsonResponse
     {
-        require_once base_path('lib/SecureInput.php');
-
-        $wsUrl = trim((string) env('WS_URL', ''));
+        $wsUrl = $this->ws->url();
         if ($wsUrl === '') {
-            return $this->jsonError(500, 'Konfigurasi server belum lengkap');
+            $wsEntry = base_path('ws/index.php');
+            if (!is_file($wsEntry)) {
+                return $this->jsonError(500, 'Konfigurasi server belum lengkap');
+            }
+
+            $this->dispatchLocalWs($request, $wsEntry);
         }
+
+        require_once base_path('lib/SecureInput.php');
 
         $method = secure_validate_method(trim((string) $request->input('method', '')));
         if ($method === null) {
@@ -28,92 +36,111 @@ class RewardApiController extends Controller
 
         try {
             if ($method === 'login') {
-                return $this->forwardToWs($wsUrl, $this->buildLoginPayload($request));
+                return $this->forwardForm($this->buildLoginPayload($request));
             }
 
             if ($method === 'getTahunAkademik') {
-                return $this->forwardToWs($wsUrl, ['method' => 'getTahunAkademik']);
+                return $this->handleGetTahunAkademik();
+            }
+
+            if ($method === 'getPrestasiKatalog') {
+                return $this->handleGetPrestasiKatalog($request);
+            }
+
+            if ($method === 'getPrestasiSaya') {
+                return $this->handleGetPrestasiSaya($request);
             }
 
             if ($method === 'submitPrestasi') {
-                return $this->handleSubmitPrestasi($request, $wsUrl);
+                return $this->handleSubmitPrestasi($request);
             }
 
             return $this->jsonError(422, 'Permintaan tidak valid');
         } catch (InvalidArgumentException $e) {
             return $this->jsonError(422, $e->getMessage());
-        } catch (Throwable) {
+        } catch (ConnectionException) {
+            return $this->jsonError(503, 'Tidak dapat terhubung ke layanan backend. Periksa WS dan koneksi database.');
+        } catch (Throwable $e) {
+            report($e);
             return $this->jsonError(500, 'Terjadi kesalahan sistem. Silakan coba lagi.');
         }
     }
 
-    private function handleSubmitPrestasi(Request $request, string $wsUrl): JsonResponse
+    private function handleGetTahunAkademik(): JsonResponse
     {
-        if (!$request->hasFile('file')) {
-            return $this->jsonError(422, 'File tidak diterima. Pastikan format PNG/JPG/PDF dan maksimal 2MB.');
-        }
+        $list = $this->ws->rememberTahunAkademik();
 
-        $file = $request->file('file');
-        if ($file === null || !$file->isValid()) {
-            return $this->jsonError(422, 'File upload tidak valid');
-        }
+        return response()
+            ->json(['status' => 200, 'data' => ['tahun_akademik' => $list]])
+            ->header('Cache-Control', 'private, max-age=300');
+    }
 
+    private function handleGetPrestasiKatalog(Request $request): JsonResponse
+    {
+        $token = trim((string) $request->input('token', ''));
+        $data = $this->ws->rememberPrestasiKatalog($token);
+
+        return response()
+            ->json(['status' => 200, 'data' => $data])
+            ->header('Cache-Control', 'private, no-store');
+    }
+
+    private function handleGetPrestasiSaya(Request $request): JsonResponse
+    {
         $token = trim((string) $request->input('token', ''));
         if (!secure_validate_token_format($token)) {
             return $this->jsonError(401, 'Token JWT tidak valid');
         }
 
-        $decoded = $this->decodeToken($token);
-        if ($decoded === null) {
+        return $this->forwardForm([
+            'method' => 'getPrestasiSaya',
+            'token' => $token,
+        ]);
+    }
+
+    private function handleSubmitPrestasi(Request $request): JsonResponse
+    {
+        $token = trim((string) $request->input('token', ''));
+        if (!secure_validate_token_format($token)) {
             return $this->jsonError(401, 'Token JWT tidak valid');
         }
 
-        $nocust = trim((string) ($decoded['nocust'] ?? ''));
-        if (!secure_validate_nocust($nocust)) {
-            return $this->jsonError(401, 'Sesi tidak valid, silakan login ulang');
-        }
-
         $fields = $this->validatePrestasiFields($request);
-        $stored = $this->storeUploadFile($file, $nocust, $fields['jenis_prestasi'], $fields['keterangan']);
-
         $payload = [
             'method' => 'submitPrestasi',
             'token' => $token,
-            'jenis_prestasi' => $fields['jenis_prestasi'],
-            'keterangan' => $fields['keterangan'],
-            'nilai_penghargaan' => $fields['nilai_penghargaan'],
+            'nisn' => $fields['nisn'],
             'tahun_akademik' => $fields['tahun_akademik'],
-            'url' => $stored['url'],
+            'semester' => $fields['semester'],
+            'prestasi_kategori_id' => (string) $fields['prestasi_kategori_id'],
+            'prestasi_tingkat_id' => (string) $fields['prestasi_tingkat_id'],
+            'prestasi_poin_id' => (string) $fields['prestasi_poin_id'],
+            'keterangan' => $fields['keterangan'],
+            'penyelenggara' => $fields['penyelenggara'],
+            'no_sertifikat' => $fields['no_sertifikat'],
+            'url' => $fields['url'],
         ];
+        if ($fields['id'] !== null) {
+            $payload['id'] = (string) $fields['id'];
+        }
 
-        $response = Http::connectTimeout(5)
-            ->timeout(20)
-            ->retry(1, 150)
-            ->asMultipart()
-            ->attach('file', fopen($stored['path'], 'r'), $stored['name'])
-            ->post($wsUrl, $payload);
-
-        return $this->parseWsResponse($response);
+        return $this->forwardForm($payload);
     }
 
     /**
-     * @return array{jenis_prestasi: string, keterangan: string, nilai_penghargaan: string, tahun_akademik: string}
+     * @return array{id: int|null, nisn: string, tahun_akademik: string, semester: string, prestasi_kategori_id: int, prestasi_tingkat_id: int, prestasi_poin_id: int, keterangan: string, penyelenggara: string, no_sertifikat: string, url: string}
      */
     private function validatePrestasiFields(Request $request): array
     {
-        $jenis = secure_validate_text_field((string) $request->input('jenis_prestasi', ''), 150);
-        if ($jenis === null) {
-            throw new InvalidArgumentException('Jenis prestasi tidak valid (maksimal 150 karakter).');
+        $idRaw = trim((string) $request->input('id', ''));
+        $id = $idRaw === '' ? null : secure_validate_positive_id($idRaw);
+        if ($idRaw !== '' && $id === null) {
+            throw new InvalidArgumentException('Pengajuan tidak valid.');
         }
 
-        $keterangan = secure_validate_text_field((string) $request->input('keterangan', ''), 500);
-        if ($keterangan === null) {
-            throw new InvalidArgumentException('Keterangan tidak valid (maksimal 500 karakter).');
-        }
-
-        $nilai = secure_validate_nilai_penghargaan((string) $request->input('nilai_penghargaan', ''));
-        if ($nilai === null) {
-            throw new InvalidArgumentException('Nilai penghargaan harus angka (maks. 2 desimal).');
+        $nisn = secure_validate_nisn((string) $request->input('nisn', ''));
+        if ($nisn === null) {
+            throw new InvalidArgumentException('NISN harus 10 digit angka, atau biarkan kosong.');
         }
 
         $tahun = secure_validate_tahun_akademik((string) $request->input('tahun_akademik', ''));
@@ -121,17 +148,56 @@ class RewardApiController extends Controller
             throw new InvalidArgumentException('Tahun akademik tidak valid.');
         }
 
+        $semester = secure_validate_semester((string) $request->input('semester', ''));
+        if ($semester === null) {
+            throw new InvalidArgumentException('Semester harus 1 atau 2.');
+        }
+
+        $kategoriId = secure_validate_positive_id((string) $request->input('prestasi_kategori_id', ''));
+        $tingkatId = secure_validate_positive_id((string) $request->input('prestasi_tingkat_id', ''));
+        $poinId = secure_validate_positive_id((string) $request->input('prestasi_poin_id', ''));
+        if ($kategoriId === null || $tingkatId === null || $poinId === null) {
+            throw new InvalidArgumentException('Jenis prestasi belum lengkap.');
+        }
+
+        $keterangan = secure_validate_text_field((string) $request->input('keterangan', ''), 500);
+        if ($keterangan === null) {
+            throw new InvalidArgumentException('Keterangan/deskripsi tidak valid (maksimal 500 karakter).');
+        }
+
+        $penyelenggara = secure_validate_text_field((string) $request->input('penyelenggara', ''), 150);
+        if ($penyelenggara === null) {
+            throw new InvalidArgumentException('Penyelenggara tidak valid (maksimal 150 karakter).');
+        }
+
+        $sertifikat = secure_validate_text_field((string) $request->input('no_sertifikat', ''), 80);
+        if ($sertifikat === null) {
+            throw new InvalidArgumentException('No sertifikat tidak valid (maksimal 80 karakter).');
+        }
+
+        $url = secure_validate_gdrive_url((string) $request->input('url', ''));
+        if ($url === null) {
+            throw new InvalidArgumentException('Link harus tautan Google Drive.');
+        }
+
         return [
-            'jenis_prestasi' => $jenis,
-            'keterangan' => $keterangan,
-            'nilai_penghargaan' => $nilai,
+            'id' => $id,
+            'nisn' => $nisn,
             'tahun_akademik' => $tahun,
+            'semester' => $semester,
+            'prestasi_kategori_id' => $kategoriId,
+            'prestasi_tingkat_id' => $tingkatId,
+            'prestasi_poin_id' => $poinId,
+            'keterangan' => $keterangan,
+            'penyelenggara' => $penyelenggara,
+            'no_sertifikat' => $sertifikat,
+            'url' => $url,
         ];
     }
 
-  /**
-   * @return array{username: string, password: string, method: string}
-   */
+    /**
+     * @return array{username: string, password: string, method: string}
+     */
     private function buildLoginPayload(Request $request): array
     {
         $username = secure_validate_username((string) $request->input('username', ''));
@@ -151,48 +217,26 @@ class RewardApiController extends Controller
         ];
     }
 
-  /**
-   * @return array{path: string, name: string, url: string}
-   */
-    private function storeUploadFile(UploadedFile $file, string $nocust, string $jenis, string $ket): array
+    /**
+     * Jalankan API di folder ws/ pada request yang sama (tanpa WS_URL remote).
+     */
+    private function dispatchLocalWs(Request $request, string $wsEntry): never
     {
-        $tmpPath = $file->getPathname();
-        $inspected = secure_inspect_upload(
-            $tmpPath,
-            (string) $file->getClientOriginalName(),
-            (int) $file->getSize()
-        );
-
-        if (!$inspected['valid']) {
-            throw new InvalidArgumentException($inspected['error'] !== '' ? $inspected['error'] : 'File upload tidak valid');
+        foreach ($request->except(['file']) as $key => $value) {
+            if (is_scalar($value) || $value === null) {
+                $_POST[$key] = (string) $value;
+            }
         }
 
-        $fileName = secure_build_upload_filename($jenis, $ket, $inspected['ext']);
-        $folder = public_path('uploads/' . $nocust);
-        if (!is_dir($folder) && !mkdir($folder, 0755, true) && !is_dir($folder)) {
-            throw new RuntimeException('UPLOAD_DIR_ERROR');
-        }
+        $_SERVER['REQUEST_METHOD'] = 'POST';
 
-        $file->move($folder, $fileName);
-        $fullPath = $folder . DIRECTORY_SEPARATOR . $fileName;
-
-        return [
-            'path' => $fullPath,
-            'name' => $fileName,
-            'url' => url('uploads/' . $nocust . '/' . $fileName),
-        ];
+        require $wsEntry;
+        exit;
     }
 
-    private function forwardToWs(string $wsUrl, array $payload): JsonResponse
+    private function forwardForm(array $payload): JsonResponse
     {
-        $response = Http::connectTimeout(5)
-            ->timeout(20)
-            ->retry(1, 150)
-            ->asForm()
-            ->acceptJson()
-            ->post($wsUrl, $this->normalizePayload($payload));
-
-        return $this->parseWsResponse($response);
+        return $this->parseWsResponse($this->ws->postForm($payload));
     }
 
     private function parseWsResponse($response): JsonResponse
@@ -204,29 +248,6 @@ class RewardApiController extends Controller
         }
 
         return $this->jsonError($response->status() ?: 502, 'Layanan backend tidak merespons dengan benar. Silakan coba lagi.');
-    }
-
-    private function normalizePayload(array $payload): array
-    {
-        $normalized = [];
-        foreach ($payload as $key => $value) {
-            if (is_scalar($value) || $value === null) {
-                $normalized[$key] = (string) $value;
-            }
-        }
-        return $normalized;
-    }
-
-    private function decodeToken(string $token): ?array
-    {
-        try {
-            require_once base_path('lib/jwt.php');
-            $jwt = new \JWT();
-            $decoded = $jwt->decode($token, (string) env('JWT_KEY'), ['HS256']);
-            return is_array($decoded) ? $decoded : null;
-        } catch (Throwable) {
-            return null;
-        }
     }
 
     private function jsonError(int $status, string $message): JsonResponse

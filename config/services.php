@@ -31,4 +31,11 @@ return [
         'region' => env('AWS_DEFAULT_REGION', 'us-east-1'),
     ],
 
+    'ws' => [
+        // Isi URL API WS yang di-deploy. Kosong = panggil folder ws/ di project ini.
+        'url' => env('WS_URL', ''),
+        'jwt_key' => env('JWT_KEY', ''),
+        'tahun_cache_ttl' => (int) env('WS_TAHUN_CACHE_TTL', 21600),
+    ],
+
 ];
