@@ -5,7 +5,7 @@ Dokumentasi folder `ws/` berdasarkan kode yang ditarik dari server.
 - **Endpoint produksi:** `http://103.23.103.43/ws_client/mualimat_reward/index.php`
 - **Entry point:** `ws/index.php`
 - **Database:** MySQL `yogya_muallimaat` (lihat `ws/.env`, jangan commit secret)
-- **Terakhir diselaraskan:** 26 Agustus 2026
+- **Terakhir diselaraskan:** 27 Agustus 2026
 
 Setiap kali folder `ws/` di-update dari server, **file ini wajib diperbarui** (method, tabel, kolom, validasi, env).
 
@@ -13,7 +13,7 @@ Setiap kali folder `ws/` di-update dari server, **file ini wajib diperbarui** (m
 
 ## Ringkasan
 
-API PHP JSON (POST). Semua aksi memakai field `method`. Laravel di project ini memanggil URL di `WS_URL`, bukan menjalankan folder ini langsung (kecuali `WS_URL` kosong).
+API PHP JSON (POST). Semua aksi memakai field `method`. Laravel di project ini biasanya memanggil URL di `WS_URL`. Method portal siswa yang belum ada di server produksi (`getPrestasiSaya`, kirim ulang `submitPrestasi` + `id`) dijalankan dari folder `ws/` lokal.
 
 | Method | Auth | Fungsi |
 |---|---|---|
@@ -21,11 +21,14 @@ API PHP JSON (POST). Semua aksi memakai field `method`. Laravel di project ini m
 | `loginApproval` | tidak | Login Musrifah / superadmin |
 | `getTahunAkademik` | tidak | Daftar tahun akademik |
 | `getPrestasiKatalog` | tidak | Master jenis → tingkat → poin |
-| `getPrestasiSaya` | JWT siswa | Daftar pengajuan siswa, status, catatan tolak, total skor |
-| `submitPrestasi` | JWT siswa | Simpan prestasi baru, atau kirim ulang yang ditolak |
+| `getPrestasiSaya` | JWT siswa | Daftar pengajuan siswa, skor disetujui, status |
+| `submitPrestasi` | JWT siswa | Simpan prestasi + tautan Google Drive; `id` = kirim ulang yang ditolak |
 | `approval` | JWT staf | List / approve / tolak |
 | `manageUsers` | JWT superadmin | CRUD Musrifah & superadmin |
 | `manageKatalog` | JWT superadmin | CRUD kategori, tingkat, dan poin |
+| `searchSiswa` | JWT staf | Cari siswi (`scctcust`) untuk catatan kepribadian |
+| `manageCatatanKepribadian` | JWT staf | CRUD catatan kepribadian siswi |
+| `manageTahfid` | JWT siswa/staf | Jadwal, setoran, dan progres tahfid |
 
 ---
 
@@ -86,6 +89,8 @@ erDiagram
     aka_prestasi_tingkat ||--o{ aka_prestasi_poin : "tingkat_id"
     aka_reward }o--|| aka_prestasi_poin : "prestasi_poin_id"
     aka_prestasi_kategori }o--o| mst_sekolah : "code01 (kosong = semua)"
+    aka_catatan_kepribadian }o--|| scctcust : "custid = CUSTID"
+    aka_catatan_kepribadian }o--|| mst_thn_aka : "bta = thn_aka"
 ```
 
 ---
@@ -169,7 +174,7 @@ Data prestasi yang diinput.
 | `id` | PK | Diisi manual `MAX(id)+1` jika autoincrement tidak jalan |
 | `custid` | ID siswa | Dari JWT `custid` (`scctcust.CUSTID` = `sm_user.urut`) |
 | `nocust` | nomor siswa | Dari JWT (`scctcust.NOCUST`, fallback `userlogin`). Folder upload = `uploads/{nocust}/` |
-| `nisn` | NISN siswa | Opsional. Kosong atau 10 digit angka |
+| `nisn` | NISN siswa | Opsional; kosong atau 10 digit |
 | `nmcust` | nama | Dari JWT (`scctcust.NMCUST`) |
 | `kelas` | kelas | Dari JWT `kelas` (`scctcust.DESC02`) |
 | `jenis_prestasi` | label gabungan | `kategori — tingkat — capaian` (disusun server) |
@@ -186,7 +191,7 @@ Data prestasi yang diinput.
 | `isapproved` | status | ENUM `pending` / `approve` / `canceled` (bukan 0/1/NULL). Default insert = `pending`. Migrasi: `ws/sql/aka_reward_approval_status.sql` |
 | `approveddate` | waktu aksi | `NOW()` saat setujui atau tolak |
 | `approvedby` | username petugas | Dari JWT staf `username` |
-| `catatan_admin` | alasan tolak | Wajib saat `tolak`. Dikosongkan saat `approve` atau saat siswa kirim ulang. Migrasi: `ws/sql/aka_reward_catatan_admin.sql` |
+| `catatan_admin` | alasan tolak | Wajib saat `tolak`, dikosongkan saat `approve`. Migrasi: `ws/sql/aka_reward_catatan_admin.sql` |
 | `created_at` | waktu input | `NOW()` |
 | `updated_at` | waktu ubah | `NOW()` |
 
@@ -259,9 +264,32 @@ Profil siswa di sistem akademik. Dipakai login siswa dan filter sekolah pada app
 | `CODE01` | kode sekolah | FK ke `mst_sekolah.CODE01` (filter Musrifah) |
 | `CODE02` | `unit` | Identitas / unit, contoh MA, MTs |
 | `DESC02` | `kelas` | Kelas, contoh IX A, ICT |
-| `DESC03` | `kelompok` | Kelompok, ditampilkan di kartu Rincian |
+| `DESC03` | `kelompok` | Kelompok / asrama, contoh TESTING |
 
 Jika `custid` di `aka_reward` tidak ketemu di `scctcust`, baris itu tidak lolos filter Musrifah (`CODE01` NULL).
+
+---
+
+### 10. `aka_catatan_kepribadian`
+
+Catatan kepribadian siswi. Diisi Musrifah / superadmin. Identitas siswi diambil dari `scctcust` (NIS, nama, kelas). Jenis pelanggaran, bentuk pembinaan, dan skor diisi manual.
+
+| Kolom | Dipakai sebagai | Keterangan |
+|---|---|---|
+| `id` | PK | AUTO_INCREMENT |
+| `custid` | FK siswi | `scctcust.CUSTID` |
+| `nocust` | NIS | `scctcust.NOCUST` |
+| `nmcust` | nama | Salinan saat simpan |
+| `kelas` | kelas | `scctcust.DESC02` |
+| `code01` | unit | Filter Musrifah |
+| `bta` | tahun ajaran | `mst_thn_aka.thn_aka` |
+| `semester` | semester | `1` ganjil, `2` genap |
+| `jenis_pelanggaran` | teks | Input manual, maks. 500 |
+| `bentuk_pembinaan` | teks | Input manual, maks. 500 |
+| `skor` | nilai | `DECIMAL`, input manual |
+| `created_by` / `updated_by` | username petugas | |
+
+Query: `ws/sql/aka_catatan_kepribadian.sql`. WS juga membuat tabel jika belum ada.
 
 ---
 
@@ -363,25 +391,19 @@ Hanya `method`. `data.tahun_akademik`: array string `YYYY/YYYY`.
 
 ### `getPrestasiSaya`
 
-Butuh JWT siswa (`custid` + `nocust`). Mengembalikan pengajuan milik siswa itu saja (maks. 200, terbaru dulu).
+Butuh JWT siswa. Tanpa field tambahan. Mengembalikan pengajuan milik `custid` + `nocust` di token (maks. 200, terbaru dulu).
 
-`data.items[]`: `id`, `nisn`, `jenis_prestasi`, `prestasi_kategori_id`, `prestasi_tingkat_id`, `prestasi_poin_id`, `keterangan`, `penyelenggara`, `no_sertifikat`, `nilai_penghargaan`, `tahun_akademik`, `semester`, `url`, `isapproved`, `catatan_admin`, `can_edit`, `created_at`, `updated_at`.
+`data.items[]`: `id`, `nisn`, `jenis_prestasi`, `prestasi_kategori_id`, `prestasi_tingkat_id`, `prestasi_poin_id`, `keterangan`, `penyelenggara`, `no_sertifikat`, `nilai_penghargaan`, `tahun_akademik`, `semester`, `url`, `isapproved`, `catatan_admin` (hanya jika `canceled`), `can_edit` (true jika `canceled`), `created_at`, `updated_at`.
 
-- `isapproved`: `pending` (menunggu), `approve` (disetujui), `canceled` (ditolak)
-- `catatan_admin` hanya terisi jika status `canceled`
-- `can_edit` = `true` hanya jika ditolak; siswa boleh mengubah data lalu `submitPrestasi` dengan `id` yang sama
-
-`data.total_skor`: jumlah `nilai_penghargaan` yang `isapproved=approve`.
-
-`data.jumlah`: hitungan `{ pending, approve, canceled }`.
+`data.total_skor`: SUM `nilai_penghargaan` yang `isapproved=approve`. `data.jumlah`: hitungan `pending` / `approve` / `canceled`.
 
 ### `submitPrestasi`
 
 | Field | Wajib | Aturan |
 |---|---|---|
 | `token` | ya | JWT siswa |
-| `id` | tidak | PK `aka_reward`. Jika diisi, harus milik siswa dan status `canceled` (kirim ulang) |
-| `nisn` | tidak | kosong, atau 10 digit angka |
+| `id` | tidak | PK `aka_reward`; jika diisi, harus milik siswa dan status `canceled` (kirim ulang) |
+| `nisn` | tidak | kosong atau 10 digit angka |
 | `tahun_akademik` atau `bta` | ya | ada di `mst_thn_aka` |
 | `semester` | ya | `1` atau `2` |
 | `prestasi_kategori_id` | ya | ada di master, selaras tingkat & poin |
@@ -392,11 +414,7 @@ Butuh JWT siswa (`custid` + `nocust`). Mengembalikan pengajuan milik siswa itu s
 | `no_sertifikat` | ya | maks. 80 |
 | `url` | ya | tautan Google Drive |
 
-Tanpa `id`: insert baru, `isapproved=pending`.
-
-Dengan `id` (ditolak): update baris yang sama, `isapproved` kembali `pending`, `catatan_admin` / `approvedby` / `approveddate` dikosongkan. Admin harus menyetujui lagi.
-
-`nilai_penghargaan` dan `jenis_prestasi` disusun server dari master poin. `data`: `id`, `url`, dan `isapproved` jika kirim ulang.
+`nilai_penghargaan` dan `jenis_prestasi` disusun server dari master poin. Tanpa `id`: INSERT status `pending`. Dengan `id`: UPDATE baris ditolak, status kembali `pending`, `catatan_admin` / `approvedby` / `approveddate` dikosongkan. `data`: `id`, `url`, plus `isapproved` saat kirim ulang.
 
 ### `approval`
 
@@ -413,7 +431,7 @@ Butuh JWT staf. `action`: `list` (default), `approve`, `tolak`.
 
 **approve / tolak:** `id` (PK `aka_reward`).
 
-Setujui menyimpan `isapproved=approve`, `approvedby` = username petugas, dan mengosongkan `catatan_admin`. Tolak wajib `catatan_admin` (3–500 karakter), menyimpan `isapproved=canceled` dan `approvedby` = username petugas. Siswa melihat catatan itu di `getPrestasiSaya` dan boleh mengirim ulang.
+Setujui menyimpan `isapproved=approve`, `approvedby` = username petugas, dan mengosongkan `catatan_admin`. Tolak wajib `catatan_admin` (3–500 karakter), menyimpan `isapproved=canceled` dan `approvedby` = username petugas.
 
 ### `manageUsers`
 
@@ -446,6 +464,22 @@ Butuh JWT `superadmin`. Mengatur master `aka_prestasi_kategori` → `aka_prestas
 
 Poin pada data prestasi yang sudah masuk tidak diubah otomatis saat nilai master diedit.
 
+### `searchSiswa`
+
+Butuh JWT staf. Field `q` (min. 2 karakter). `data.items`: `custid`, `nocust`, `nmcust`, `kelas`, `code01`, `sekolah`. Musrifah hanya melihat siswi unitnya.
+
+### `manageCatatanKepribadian`
+
+Butuh JWT staf. `action`: `list`, `get`, `create`, `update`, `delete`.
+
+**create/update:** `nis`, `tahun_akademik` (`YYYY/YYYY`), `semester` (`1`/`2`), `jenis_pelanggaran`, `bentuk_pembinaan`, `skor`. Update plus `id`. Identitas nama/kelas diambil dari `scctcust` berdasarkan NIS.
+
+**get / delete:** `id`.
+
+### `manageTahfid`
+
+Butuh JWT. Siswa: `action` `myjadwal`, `submitsetoran`. Staf: `list` / `listjadwal`, `listkelas`, `get`, `save` / `create` / `update`, `delete`, `listpercepatan`, `savepercepatan`, `deletepercepatan`, `siswaprogress` / `getprogress`, `saveprogress`. Tabel dibuat otomatis jika belum ada (`aka_tahfid_jadwal`, detail, setoran, progres).
+
 ---
 
 ## Kode HTTP yang dipakai
@@ -464,10 +498,11 @@ Poin pada data prestasi yang sudah masuk tidak diubah otomatis saat nilai master
 
 ## Catatan integrasi Laravel
 
-- Frontend siswa memakai `login`, `getTahunAkademik`, `getPrestasiKatalog`, `submitPrestasi`.
+- Frontend siswa memakai `login`, `getTahunAkademik`, `getPrestasiKatalog`, `getPrestasiSaya`, `submitPrestasi`.
 - `loginApproval`, `approval`, `manageUsers`, `manageKatalog` dipakai aplikasi Approval Prestasi (Laravel).
-- Proxy siswa: `POST /api/reward` → `WS_URL`.
-- Tahun akademik dan katalog prestasi di-cache Laravel (default 6 jam).
+- `loginApproval`, `searchSiswa`, `manageCatatanKepribadian` dipakai aplikasi Catatan Kepribadian Siswi (Laravel).
+- Proxy siswa: `POST /api/reward` → `WS_URL` untuk login, tahun akademik, katalog, dan submit baru. `getPrestasiSaya` dan kirim ulang (`submitPrestasi` + `id`) dijalankan dari `ws/index.php` lokal sampai method itu di-upload ke server.
+- Tahun akademik di-cache Laravel (default 6 jam). Katalog prestasi cache singkat (60 detik, key `ws.prestasi_katalog.v3`).
 
 ---
 

@@ -18,12 +18,17 @@ class RewardApiController extends Controller
     public function handle(Request $request): JsonResponse
     {
         $wsUrl = $this->ws->url();
-        if ($wsUrl === '') {
-            $wsEntry = base_path('ws/index.php');
+        $wsEntry = base_path('ws/index.php');
+        $methodHint = trim((string) $request->input('method', ''));
+        $needsLocalMethod = $methodHint === 'getPrestasiSaya'
+            || ($methodHint === 'submitPrestasi' && trim((string) $request->input('id', '')) !== '');
+
+        if ($wsUrl === '' || $needsLocalMethod) {
             if (!is_file($wsEntry)) {
                 return $this->jsonError(500, 'Konfigurasi server belum lengkap');
             }
 
+            // Include ws/index.php before lib/SecureInput.php — both define the same helpers.
             $this->dispatchLocalWs($request, $wsEntry);
         }
 

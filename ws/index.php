@@ -70,7 +70,7 @@ const SECURE_INPUT_DANGEROUS_EXT = [
     'jar',
 ];
 
-const SECURE_INPUT_ALLOWED_METHODS = ['login', 'loginApproval', 'getTahunAkademik', 'getPrestasiKatalog', 'getPrestasiSaya', 'submitPrestasi', 'approval', 'manageUsers', 'manageKatalog'];
+const SECURE_INPUT_ALLOWED_METHODS = ['login', 'loginApproval', 'getTahunAkademik', 'getPrestasiKatalog', 'getPrestasiSaya', 'submitPrestasi', 'approval', 'manageUsers', 'manageKatalog', 'searchSiswa', 'manageCatatanKepribadian', 'manageTahfid'];
 
 function writeLog(string $event, array $context = []): void
 {
@@ -632,7 +632,7 @@ function fetchPrestasiUserByLogin(PDO $pdo, string $username): ?array
             ms.DESC01 AS nama_sekolah
         FROM prestasi_dan_pelanggaran_user u
         LEFT JOIN mst_sekolah ms ON ms.CODE01 = u.code01
-        WHERE TRIM(u.username) = :username
+        WHERE LOWER(TRIM(u.username)) = LOWER(:username)
         LIMIT 1
     ");
     $stmt->bindValue(":username", $username, PDO::PARAM_STR);
@@ -833,7 +833,7 @@ function normalizeRole(string $role): string
 function isApprovalStaffRole(string $role): bool
 {
     $role = normalizeRole($role);
-    return $role === 'musrifah' || $role === 'superadmin';
+    return $role === 'musrifah' || $role === 'musyrifah' || $role === 'superadmin';
 }
 
 function isSuperadminRole(string $role): bool
@@ -2253,13 +2253,77 @@ function doSubmitPrestasi(array $req, array $auth): array
     ];
 }
 
-function doGetTahunAkademik(): array
+function ensureCatatanKepribadianTable(PDO $pdo): void
 {
-    $pdo = dbConnectPdo();
-    $stmt = $pdo->prepare("SELECT thn_aka FROM mst_thn_aka ORDER BY urut ASC");
-    $stmt->execute();
-    $rows = $stmt->fetchAll();
+    static $ready = false;
+    if ($ready) {
+        return;
+    }
+    try {
+        $pdo->query("SELECT id FROM aka_catatan_kepribadian LIMIT 0");
+        $ready = true;
+        return;
+    } catch (Throwable) {
+        // Tabel belum ada.
+    }
+    try {
+        $pdo->exec("
+            CREATE TABLE aka_catatan_kepribadian (
+                id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                custid VARCHAR(50) NOT NULL,
+                nocust VARCHAR(50) NOT NULL,
+                nmcust VARCHAR(150) NOT NULL DEFAULT '',
+                kelas VARCHAR(80) NOT NULL DEFAULT '',
+                code01 VARCHAR(20) NOT NULL DEFAULT '',
+                bta VARCHAR(20) NOT NULL,
+                semester TINYINT NOT NULL DEFAULT 1,
+                jenis_pelanggaran VARCHAR(500) NOT NULL,
+                bentuk_pembinaan VARCHAR(500) NOT NULL,
+                skor DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                created_by VARCHAR(50) NOT NULL DEFAULT '',
+                updated_by VARCHAR(50) NOT NULL DEFAULT '',
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL,
+                PRIMARY KEY (id),
+                KEY idx_nocust (nocust),
+                KEY idx_bta_sem (bta, semester),
+                KEY idx_code01 (code01)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+        $ready = true;
+    } catch (Throwable $e) {
+        $msg = $e->getMessage();
+        if (stripos($msg, "already exists") !== false) {
+            $ready = true;
+            return;
+        }
+        writeLog("CATATAN_KEPRIBADIAN_CREATE_FAIL", ["message" => $msg]);
+        fail(500, "Tabel aka_catatan_kepribadian belum ada. Jalankan ws/sql/aka_catatan_kepribadian.sql");
+    }
+}
 
+function staffUnitCode01(array $auth): string
+{
+    return isSuperadminRole((string) ($auth["role"] ?? ""))
+        ? ""
+        : trim((string) ($auth["code01"] ?? ""));
+}
+
+function fetchTahunAkademikList(PDO $pdo): array
+{
+    $rows = [];
+    try {
+        $stmt = $pdo->prepare("SELECT thn_aka FROM mst_thn_aka ORDER BY urut ASC");
+        $stmt->execute();
+        $rows = $stmt->fetchAll() ?: [];
+    } catch (Throwable) {
+        try {
+            $stmt = $pdo->query("SELECT thn_aka FROM mst_thn_aka");
+            $rows = $stmt ? ($stmt->fetchAll() ?: []) : [];
+        } catch (Throwable) {
+            return [];
+        }
+    }
     $result = [];
     foreach ($rows as $row) {
         $value = trim((string) ($row["thn_aka"] ?? ""));
@@ -2267,8 +2331,319 @@ function doGetTahunAkademik(): array
             $result[] = $value;
         }
     }
+    return $result;
+}
 
-    return ["tahun_akademik" => $result];
+function fetchScopeSekolahName(PDO $pdo, string $code01): string
+{
+    $code01 = trim($code01);
+    if ($code01 === "") {
+        return "";
+    }
+    $stmt = $pdo->prepare("SELECT DESC01 FROM mst_sekolah WHERE CODE01 = :code01 LIMIT 1");
+    $stmt->bindValue(":code01", $code01, PDO::PARAM_STR);
+    $stmt->execute();
+    return trim((string) ($stmt->fetchColumn() ?: ""));
+}
+
+function fetchSiswaByNocust(PDO $pdo, string $nocust, string $userCode01): ?array
+{
+    $sql = "
+        SELECT
+            TRIM(c.CUSTID) AS custid,
+            TRIM(c.NOCUST) AS nocust,
+            TRIM(c.NMCUST) AS nmcust,
+            TRIM(c.DESC02) AS kelas,
+            TRIM(c.CODE01) AS code01,
+            TRIM(ms.DESC01) AS sekolah
+        FROM scctcust c
+        LEFT JOIN mst_sekolah ms ON ms.CODE01 = c.CODE01
+        WHERE TRIM(c.NOCUST) = :nocust
+          AND (:code01_empty = '' OR c.CODE01 = :code01_value)
+        LIMIT 1
+    ";
+    $stmt = $pdo->prepare($sql);
+    $stmt->bindValue(":nocust", $nocust, PDO::PARAM_STR);
+    $stmt->bindValue(":code01_empty", $userCode01, PDO::PARAM_STR);
+    $stmt->bindValue(":code01_value", $userCode01, PDO::PARAM_STR);
+    $stmt->execute();
+    $row = $stmt->fetch();
+    return $row ?: null;
+}
+
+function mapCatatanKepribadianRow(array $row): array
+{
+    return [
+        "id" => (int) ($row["id"] ?? 0),
+        "custid" => trim((string) ($row["custid"] ?? "")),
+        "nocust" => trim((string) ($row["nocust"] ?? "")),
+        "nmcust" => trim((string) ($row["nmcust"] ?? "")),
+        "kelas" => trim((string) ($row["kelas"] ?? "")),
+        "code01" => trim((string) ($row["code01"] ?? "")),
+        "sekolah" => trim((string) ($row["sekolah"] ?? "")),
+        "bta" => trim((string) ($row["bta"] ?? "")),
+        "semester" => (string) ((int) ($row["semester"] ?? 1)),
+        "jenis_pelanggaran" => trim((string) ($row["jenis_pelanggaran"] ?? "")),
+        "bentuk_pembinaan" => trim((string) ($row["bentuk_pembinaan"] ?? "")),
+        "skor" => number_format((float) ($row["skor"] ?? 0), 2, ".", ""),
+        "created_by" => trim((string) ($row["created_by"] ?? "")),
+        "updated_by" => trim((string) ($row["updated_by"] ?? "")),
+        "created_at" => trim((string) ($row["created_at"] ?? "")),
+        "updated_at" => trim((string) ($row["updated_at"] ?? "")),
+    ];
+}
+
+function doSearchSiswa(array $req, array $auth): array
+{
+    assertApprovalRole($auth);
+    $q = trim((string) ($req["q"] ?? ""));
+    if (mb_strlen($q) < 2 || mb_strlen($q) > 80) {
+        fail(422, "Kata kunci pencarian minimal 2 karakter");
+    }
+
+    $pdo = dbConnectPdo();
+    $userCode01 = staffUnitCode01($auth);
+    $like = "%" . str_replace(["\\", "%", "_"], ["\\\\", "\\%", "\\_"], $q) . "%";
+    $sql = "
+        SELECT
+            TRIM(c.CUSTID) AS custid,
+            TRIM(c.NOCUST) AS nocust,
+            TRIM(c.NMCUST) AS nmcust,
+            TRIM(c.DESC02) AS kelas,
+            TRIM(c.CODE01) AS code01,
+            TRIM(ms.DESC01) AS sekolah
+        FROM scctcust c
+        LEFT JOIN mst_sekolah ms ON ms.CODE01 = c.CODE01
+        WHERE (c.NOCUST LIKE :q1 OR c.NMCUST LIKE :q2)
+          AND (:code01_empty = '' OR c.CODE01 = :code01_value)
+        ORDER BY c.NMCUST ASC
+        LIMIT 20
+    ";
+    $stmt = $pdo->prepare($sql);
+    $stmt->bindValue(":q1", $like, PDO::PARAM_STR);
+    $stmt->bindValue(":q2", $like, PDO::PARAM_STR);
+    $stmt->bindValue(":code01_empty", $userCode01, PDO::PARAM_STR);
+    $stmt->bindValue(":code01_value", $userCode01, PDO::PARAM_STR);
+    $stmt->execute();
+    $rows = $stmt->fetchAll() ?: [];
+    $items = [];
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $nocust = trim((string) ($row["nocust"] ?? ""));
+        if ($nocust === "" || !secure_validate_nocust($nocust)) {
+            continue;
+        }
+        $items[] = [
+            "custid" => trim((string) ($row["custid"] ?? "")),
+            "nocust" => $nocust,
+            "nmcust" => trim((string) ($row["nmcust"] ?? "")),
+            "kelas" => trim((string) ($row["kelas"] ?? "")),
+            "code01" => trim((string) ($row["code01"] ?? "")),
+            "sekolah" => trim((string) ($row["sekolah"] ?? "")),
+        ];
+    }
+
+    return ["items" => $items];
+}
+
+function doManageCatatanKepribadian(array $req, array $auth): array
+{
+    assertApprovalRole($auth);
+    $action = strtolower(trim((string) ($req["action"] ?? "list")));
+    if (!in_array($action, ["list", "get", "create", "update", "delete"], true)) {
+        fail(422, "Aksi catatan tidak valid");
+    }
+
+    $pdo = dbConnectPdo();
+    ensureCatatanKepribadianTable($pdo);
+    $userCode01 = staffUnitCode01($auth);
+
+    if ($action === "list") {
+        $q = trim((string) ($req["q"] ?? ""));
+        $bta = trim((string) ($req["bta"] ?? ""));
+        $semester = trim((string) ($req["semester"] ?? ""));
+        $sql = "
+            SELECT
+                ck.id, ck.custid, ck.nocust, ck.nmcust, ck.kelas, ck.code01,
+                ms.DESC01 AS sekolah, ck.bta, ck.semester, ck.jenis_pelanggaran,
+                ck.bentuk_pembinaan, ck.skor, ck.created_by, ck.updated_by,
+                ck.created_at, ck.updated_at
+            FROM aka_catatan_kepribadian ck
+            LEFT JOIN mst_sekolah ms ON ms.CODE01 = ck.code01
+            WHERE (:code01_empty = '' OR ck.code01 = :code01_value)
+        ";
+        if ($q !== "") {
+            $sql .= " AND (ck.nocust LIKE :q_nis OR ck.nmcust LIKE :q_nama) ";
+        }
+        if ($bta !== "") {
+            $sql .= " AND ck.bta = :bta ";
+        }
+        if ($semester === "1" || $semester === "2") {
+            $sql .= " AND ck.semester = :semester ";
+        }
+        $sql .= " ORDER BY ck.created_at DESC, ck.id DESC LIMIT 1000 ";
+        $stmt = $pdo->prepare($sql);
+        $stmt->bindValue(":code01_empty", $userCode01, PDO::PARAM_STR);
+        $stmt->bindValue(":code01_value", $userCode01, PDO::PARAM_STR);
+        if ($q !== "") {
+            $like = "%" . str_replace(["\\", "%", "_"], ["\\\\", "\\%", "\\_"], $q) . "%";
+            $stmt->bindValue(":q_nis", $like, PDO::PARAM_STR);
+            $stmt->bindValue(":q_nama", $like, PDO::PARAM_STR);
+        }
+        if ($bta !== "") {
+            $stmt->bindValue(":bta", $bta, PDO::PARAM_STR);
+        }
+        if ($semester === "1" || $semester === "2") {
+            $stmt->bindValue(":semester", (int) $semester, PDO::PARAM_INT);
+        }
+        try {
+            $stmt->execute();
+        } catch (Throwable $e) {
+            writeLog("CATATAN_KEPRIBADIAN_LIST_FAIL", ["message" => $e->getMessage()]);
+            fail(500, "Tabel aka_catatan_kepribadian belum siap. Jalankan ws/sql/aka_catatan_kepribadian.sql");
+        }
+        $rows = $stmt->fetchAll() ?: [];
+        $items = [];
+        foreach ($rows as $row) {
+            if (is_array($row)) {
+                $items[] = mapCatatanKepribadianRow($row);
+            }
+        }
+        return [
+            "items" => $items,
+            "total" => count($items),
+            "tahun_akademik" => fetchTahunAkademikList($pdo),
+            "scope_code01" => $userCode01,
+            "scope_sekolah" => fetchScopeSekolahName($pdo, $userCode01),
+        ];
+    }
+
+    $by = approvalStaffUsername($auth);
+    $id = (int) ($req["id"] ?? 0);
+    if ($action === "get" || $action === "update" || $action === "delete") {
+        if ($id <= 0) {
+            fail(422, "ID catatan tidak valid");
+        }
+        $getSql = "
+            SELECT
+                ck.id, ck.custid, ck.nocust, ck.nmcust, ck.kelas, ck.code01,
+                ms.DESC01 AS sekolah, ck.bta, ck.semester, ck.jenis_pelanggaran,
+                ck.bentuk_pembinaan, ck.skor, ck.created_by, ck.updated_by,
+                ck.created_at, ck.updated_at
+            FROM aka_catatan_kepribadian ck
+            LEFT JOIN mst_sekolah ms ON ms.CODE01 = ck.code01
+            WHERE ck.id = :id
+              AND (:code01_empty = '' OR ck.code01 = :code01_value)
+            LIMIT 1
+        ";
+        $getStmt = $pdo->prepare($getSql);
+        $getStmt->bindValue(":id", $id, PDO::PARAM_INT);
+        $getStmt->bindValue(":code01_empty", $userCode01, PDO::PARAM_STR);
+        $getStmt->bindValue(":code01_value", $userCode01, PDO::PARAM_STR);
+        $getStmt->execute();
+        $existing = $getStmt->fetch();
+        if (!$existing) {
+            fail(404, "Catatan tidak ditemukan atau di luar akses sekolah");
+        }
+        if ($action === "get") {
+            return [
+                "item" => mapCatatanKepribadianRow($existing),
+                "tahun_akademik" => fetchTahunAkademikList($pdo),
+                "scope_code01" => $userCode01,
+                "scope_sekolah" => fetchScopeSekolahName($pdo, $userCode01),
+            ];
+        }
+        if ($action === "delete") {
+            $del = $pdo->prepare("DELETE FROM aka_catatan_kepribadian WHERE id = :id LIMIT 1");
+            $del->bindValue(":id", $id, PDO::PARAM_INT);
+            $del->execute();
+            writeLog("CATATAN_KEPRIBADIAN_DELETE", ["id" => $id, "by" => $by]);
+            return ["id" => $id, "message" => "Catatan berhasil dihapus"];
+        }
+    }
+
+    $nis = trim((string) ($req["nis"] ?? ($req["nocust"] ?? "")));
+    $tahun = secure_validate_tahun_akademik((string) ($req["tahun_akademik"] ?? ($req["bta"] ?? "")));
+    $semester = secure_validate_semester((string) ($req["semester"] ?? ""));
+    $jenis = secure_validate_text_field((string) ($req["jenis_pelanggaran"] ?? ""), 500, 3);
+    $pembinaan = secure_validate_text_field((string) ($req["bentuk_pembinaan"] ?? ""), 500, 3);
+    $skor = secure_validate_nilai_penghargaan((string) ($req["skor"] ?? ""));
+    if ($nis === "" || !secure_validate_nocust($nis)) {
+        fail(422, "NIS siswi tidak valid");
+    }
+    if ($tahun === null) {
+        fail(422, "Tahun ajaran tidak valid");
+    }
+    if ($semester === null) {
+        fail(422, "Semester tidak valid");
+    }
+    if ($jenis === null || $pembinaan === null) {
+        fail(422, "Jenis pelanggaran dan bentuk pembinaan wajib diisi");
+    }
+    if ($skor === null) {
+        fail(422, "Skor tidak valid");
+    }
+    assertTahunAkademikExists($pdo, $tahun);
+    $siswa = fetchSiswaByNocust($pdo, $nis, $userCode01);
+    if (!$siswa) {
+        fail(422, "Siswi tidak ditemukan atau di luar akses sekolah");
+    }
+
+    if ($action === "create") {
+        $ins = $pdo->prepare("
+            INSERT INTO aka_catatan_kepribadian
+                (custid, nocust, nmcust, kelas, code01, bta, semester, jenis_pelanggaran, bentuk_pembinaan, skor, created_by, updated_by, created_at, updated_at)
+            VALUES
+                (:custid, :nocust, :nmcust, :kelas, :code01, :bta, :semester, :jenis, :pembinaan, :skor, :created_by, :updated_by, NOW(), NOW())
+        ");
+        $ins->bindValue(":custid", (string) $siswa["custid"], PDO::PARAM_STR);
+        $ins->bindValue(":nocust", (string) $siswa["nocust"], PDO::PARAM_STR);
+        $ins->bindValue(":nmcust", (string) $siswa["nmcust"], PDO::PARAM_STR);
+        $ins->bindValue(":kelas", (string) $siswa["kelas"], PDO::PARAM_STR);
+        $ins->bindValue(":code01", (string) $siswa["code01"], PDO::PARAM_STR);
+        $ins->bindValue(":bta", $tahun, PDO::PARAM_STR);
+        $ins->bindValue(":semester", (int) $semester, PDO::PARAM_INT);
+        $ins->bindValue(":jenis", $jenis, PDO::PARAM_STR);
+        $ins->bindValue(":pembinaan", $pembinaan, PDO::PARAM_STR);
+        $ins->bindValue(":skor", $skor, PDO::PARAM_STR);
+        $ins->bindValue(":created_by", $by, PDO::PARAM_STR);
+        $ins->bindValue(":updated_by", $by, PDO::PARAM_STR);
+        $ins->execute();
+        $newId = (int) $pdo->lastInsertId();
+        writeLog("CATATAN_KEPRIBADIAN_CREATE", ["id" => $newId, "nocust" => $siswa["nocust"], "by" => $by]);
+        return ["id" => $newId, "message" => "Catatan berhasil disimpan"];
+    }
+
+    $upd = $pdo->prepare("
+        UPDATE aka_catatan_kepribadian
+        SET custid = :custid, nocust = :nocust, nmcust = :nmcust, kelas = :kelas, code01 = :code01,
+            bta = :bta, semester = :semester, jenis_pelanggaran = :jenis, bentuk_pembinaan = :pembinaan,
+            skor = :skor, updated_by = :updated_by, updated_at = NOW()
+        WHERE id = :id
+        LIMIT 1
+    ");
+    $upd->bindValue(":custid", (string) $siswa["custid"], PDO::PARAM_STR);
+    $upd->bindValue(":nocust", (string) $siswa["nocust"], PDO::PARAM_STR);
+    $upd->bindValue(":nmcust", (string) $siswa["nmcust"], PDO::PARAM_STR);
+    $upd->bindValue(":kelas", (string) $siswa["kelas"], PDO::PARAM_STR);
+    $upd->bindValue(":code01", (string) $siswa["code01"], PDO::PARAM_STR);
+    $upd->bindValue(":bta", $tahun, PDO::PARAM_STR);
+    $upd->bindValue(":semester", (int) $semester, PDO::PARAM_INT);
+    $upd->bindValue(":jenis", $jenis, PDO::PARAM_STR);
+    $upd->bindValue(":pembinaan", $pembinaan, PDO::PARAM_STR);
+    $upd->bindValue(":skor", $skor, PDO::PARAM_STR);
+    $upd->bindValue(":updated_by", $by, PDO::PARAM_STR);
+    $upd->bindValue(":id", $id, PDO::PARAM_INT);
+    $upd->execute();
+    writeLog("CATATAN_KEPRIBADIAN_UPDATE", ["id" => $id, "nocust" => $siswa["nocust"], "by" => $by]);
+    return ["id" => $id, "message" => "Catatan berhasil diperbarui"];
+}
+
+function doGetTahunAkademik(): array
+{
+    return ["tahun_akademik" => fetchTahunAkademikList(dbConnectPdo())];
 }
 
 function doGetPrestasiKatalog(array $req = []): array
@@ -2287,6 +2662,1575 @@ function doGetPrestasiKatalog(array $req = []): array
         "tingkat" => $data["tingkat"],
         "poin" => $data["poin"],
     ];
+}
+
+function quranSurahAyatCount(int $nomor): int
+{
+    static $counts = [
+        7, 286, 200, 176, 120, 165, 206, 75, 129, 109, 123, 111, 43, 52, 99, 128, 111, 110, 98, 135,
+        112, 78, 118, 64, 77, 227, 93, 88, 69, 60, 34, 30, 73, 54, 45, 83, 182, 88, 75, 85,
+        54, 53, 89, 59, 37, 35, 38, 29, 18, 45, 60, 49, 62, 55, 78, 96, 29, 22, 24, 13,
+        14, 11, 11, 18, 12, 12, 30, 52, 52, 44, 28, 28, 20, 56, 40, 31, 50, 40, 46, 42,
+        29, 19, 36, 25, 22, 17, 19, 26, 30, 20, 15, 21, 11, 8, 8, 19, 5, 8, 8, 11,
+        11, 8, 3, 9, 5, 4, 7, 3, 6, 3, 5, 4, 5, 6,
+    ];
+    if ($nomor < 1 || $nomor > 114) {
+        return 0;
+    }
+    return (int) $counts[$nomor - 1];
+}
+
+function quranJuzForAyah(int $surah, int $ayah): int
+{
+    static $starts = [
+        [1, 1, 1], [2, 2, 142], [3, 2, 253], [4, 3, 93], [5, 4, 24],
+        [6, 4, 148], [7, 5, 82], [8, 6, 111], [9, 7, 88], [10, 8, 41],
+        [11, 9, 93], [12, 11, 6], [13, 12, 53], [14, 15, 1], [15, 17, 1],
+        [16, 18, 75], [17, 21, 1], [18, 23, 1], [19, 25, 21], [20, 27, 56],
+        [21, 29, 46], [22, 33, 31], [23, 36, 28], [24, 39, 32], [25, 41, 47],
+        [26, 46, 1], [27, 51, 31], [28, 58, 1], [29, 67, 1], [30, 78, 1],
+    ];
+    $juz = 1;
+    foreach ($starts as $row) {
+        [$j, $s, $a] = $row;
+        if ($surah > $s || ($surah === $s && $ayah >= $a)) {
+            $juz = $j;
+        }
+    }
+    return $juz;
+}
+
+function tahfidIsSiswaAuth(array $auth): bool
+{
+    return trim((string) ($auth["custid"] ?? "")) !== "";
+}
+
+function tahfidJuzLabel(int $dari, int $sampai): string
+{
+    if ($dari === $sampai) {
+        return "Juz " . $dari;
+    }
+    return "Juz " . $dari . "–" . $sampai;
+}
+
+function tahfidAyatLabel(bool $lengkap, int $dari, int $sampai): string
+{
+    if ($lengkap) {
+        return "Lengkap (ayat " . $dari . "–" . $sampai . ")";
+    }
+    return "Ayat " . $dari . "–" . $sampai;
+}
+
+function ensureTahfidJadwalCode03(PDO $pdo): void
+{
+    static $ready = false;
+    if ($ready) {
+        return;
+    }
+    try {
+        $pdo->query("SELECT code03 FROM aka_tahfid_jadwal LIMIT 0");
+        $ready = true;
+        return;
+    } catch (Throwable) {
+        // Kolom belum ada.
+    }
+    try {
+        $pdo->exec("ALTER TABLE aka_tahfid_jadwal ADD COLUMN code03 VARCHAR(20) NOT NULL DEFAULT '' AFTER kelas");
+        try {
+            $pdo->exec("ALTER TABLE aka_tahfid_jadwal ADD KEY idx_code03 (code03)");
+        } catch (Throwable) {
+            // Index mungkin sudah ada.
+        }
+        $ready = true;
+    } catch (Throwable $e) {
+        if (stripos($e->getMessage(), "Duplicate") !== false) {
+            $ready = true;
+            return;
+        }
+        writeLog("TAHFID_CODE03_FAIL", ["message" => $e->getMessage()]);
+        fail(500, "Kolom code03 pada aka_tahfid_jadwal belum ada. Jalankan ALTER di ws/sql/aka_tahfid.sql");
+    }
+}
+
+function ensureTahfidProgressTables(PDO $pdo): void
+{
+    static $ready = false;
+    if ($ready) {
+        return;
+    }
+    try {
+        $pdo->query("SELECT id, ayat_sampai, status, catatan FROM aka_tahfid_progress LIMIT 0");
+        $pdo->query("SELECT id FROM aka_tahfid_progress_log LIMIT 0");
+        $ready = true;
+        return;
+    } catch (Throwable) {
+        // Tabel belum ada.
+    }
+    try {
+        $pdo->exec("
+            CREATE TABLE IF NOT EXISTS aka_tahfid_progress (
+                id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                custid VARCHAR(50) NOT NULL,
+                nocust VARCHAR(50) NOT NULL DEFAULT '',
+                nmcust VARCHAR(150) NOT NULL DEFAULT '',
+                code01 VARCHAR(20) NOT NULL DEFAULT '',
+                kelas VARCHAR(80) NOT NULL DEFAULT '',
+                jadwal_detail_id INT UNSIGNED NOT NULL,
+                ayat_dari SMALLINT UNSIGNED NOT NULL DEFAULT 1,
+                ayat_sampai SMALLINT UNSIGNED NOT NULL DEFAULT 1,
+                status VARCHAR(20) NOT NULL DEFAULT 'proses',
+                catatan TEXT NULL,
+                created_by VARCHAR(50) NOT NULL DEFAULT '',
+                updated_by VARCHAR(50) NOT NULL DEFAULT '',
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL,
+                PRIMARY KEY (id),
+                UNIQUE KEY uk_siswa_detail_progress (custid, jadwal_detail_id),
+                KEY idx_custid (custid),
+                KEY idx_detail (jadwal_detail_id),
+                KEY idx_status (status)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+        $pdo->exec("
+            CREATE TABLE IF NOT EXISTS aka_tahfid_progress_log (
+                id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                progress_id INT UNSIGNED NOT NULL,
+                jadwal_detail_id INT UNSIGNED NOT NULL,
+                custid VARCHAR(50) NOT NULL,
+                ayat_dari SMALLINT UNSIGNED NOT NULL DEFAULT 1,
+                ayat_sampai SMALLINT UNSIGNED NOT NULL DEFAULT 1,
+                status VARCHAR(20) NOT NULL DEFAULT 'proses',
+                catatan TEXT NULL,
+                created_by VARCHAR(50) NOT NULL DEFAULT '',
+                created_at DATETIME NOT NULL,
+                PRIMARY KEY (id),
+                KEY idx_progress (progress_id),
+                KEY idx_custid (custid),
+                KEY idx_detail (jadwal_detail_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+        $ready = true;
+    } catch (Throwable $e) {
+        writeLog("TAHFID_PROGRESS_CREATE_FAIL", ["message" => $e->getMessage()]);
+        fail(500, "Tabel progress tahfid belum ada. Jalankan ws/sql/aka_tahfid.sql");
+    }
+}
+
+function tahfidProgressStatusLabel(string $status): string
+{
+    return match ($status) {
+        "lunas" => "Lunas",
+        "proses" => "Proses",
+        default => "Belum",
+    };
+}
+
+function tahfidCoveredAyatLabel(array $covered, int $targetDari, int $targetSampai): string
+{
+    if (count($covered) === 0) {
+        return "";
+    }
+    ksort($covered);
+    $parts = [];
+    $start = null;
+    $prev = null;
+    foreach (array_keys($covered) as $ayat) {
+        $ayat = (int) $ayat;
+        if ($start === null) {
+            $start = $ayat;
+            $prev = $ayat;
+            continue;
+        }
+        if ($ayat === $prev + 1) {
+            $prev = $ayat;
+            continue;
+        }
+        $parts[] = $start === $prev ? (string) $start : ($start . "–" . $prev);
+        $start = $ayat;
+        $prev = $ayat;
+    }
+    if ($start !== null) {
+        $parts[] = $start === $prev ? (string) $start : ($start . "–" . $prev);
+    }
+    $label = "Ayat " . implode(", ", $parts);
+    if (count($covered) >= ($targetSampai - $targetDari + 1)) {
+        return $label;
+    }
+    return $label;
+}
+
+function tahfidSummarizeCoverage(array $ranges, int $targetDari, int $targetSampai): array
+{
+    $covered = [];
+    foreach ($ranges as $row) {
+        $a = max($targetDari, (int) ($row["dari"] ?? $row["ayat_dari"] ?? 0));
+        $b = min($targetSampai, (int) ($row["sampai"] ?? $row["ayat_sampai"] ?? 0));
+        if ($b < $a) {
+            continue;
+        }
+        for ($i = $a; $i <= $b; $i++) {
+            $covered[$i] = true;
+        }
+    }
+    $lunas = $targetSampai >= $targetDari;
+    for ($i = $targetDari; $i <= $targetSampai; $i++) {
+        if (!isset($covered[$i])) {
+            $lunas = false;
+            break;
+        }
+    }
+    $min = 0;
+    $max = 0;
+    if (count($covered) > 0) {
+        $min = (int) min(array_keys($covered));
+        $max = (int) max(array_keys($covered));
+    }
+    $status = $lunas ? "lunas" : (count($covered) > 0 ? "proses" : "belum");
+    return [
+        "ayat_dari" => $min > 0 ? $min : $targetDari,
+        "ayat_sampai" => $max > 0 ? $max : $targetDari,
+        "status" => $status,
+        "progress_label" => $status === "belum" ? "" : tahfidCoveredAyatLabel($covered, $targetDari, $targetSampai),
+    ];
+}
+
+function tahfidFetchProgressLogs(PDO $pdo, string $custid, int $detailId, int $limit = 8): array
+{
+    $stmt = $pdo->prepare("
+        SELECT ayat_dari, ayat_sampai, status, catatan, created_by, created_at
+        FROM aka_tahfid_progress_log
+        WHERE custid = :c AND jadwal_detail_id = :d
+        ORDER BY id DESC
+        LIMIT " . max(1, $limit) . "
+    ");
+    $stmt->bindValue(":c", $custid, PDO::PARAM_STR);
+    $stmt->bindValue(":d", $detailId, PDO::PARAM_INT);
+    $stmt->execute();
+    $items = [];
+    foreach ($stmt->fetchAll() ?: [] as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $items[] = [
+            "ayat_dari" => (int) $row["ayat_dari"],
+            "ayat_sampai" => (int) $row["ayat_sampai"],
+            "ayat_label" => "Ayat " . (int) $row["ayat_dari"] . "–" . (int) $row["ayat_sampai"],
+            "status" => trim((string) $row["status"]),
+            "status_label" => tahfidProgressStatusLabel(trim((string) $row["status"])),
+            "catatan" => trim((string) ($row["catatan"] ?? "")),
+            "created_by" => trim((string) ($row["created_by"] ?? "")),
+            "created_at" => trim((string) ($row["created_at"] ?? "")),
+        ];
+    }
+    return $items;
+}
+
+function tahfidFetchAllProgressRanges(PDO $pdo, string $custid, int $detailId): array
+{
+    $stmt = $pdo->prepare("
+        SELECT id, ayat_dari, ayat_sampai, status FROM aka_tahfid_progress_log
+        WHERE custid = :c AND jadwal_detail_id = :d
+        ORDER BY id ASC
+    ");
+    $stmt->bindValue(":c", $custid, PDO::PARAM_STR);
+    $stmt->bindValue(":d", $detailId, PDO::PARAM_INT);
+    $stmt->execute();
+    $rows = [];
+    foreach ($stmt->fetchAll() ?: [] as $row) {
+        if (is_array($row)) {
+            $rows[] = $row;
+        }
+    }
+    return $rows;
+}
+
+function tahfidActiveRangesForStatus(array $logs, bool $forceLunas, int $newLogId): array
+{
+    $start = 0;
+    if (!$forceLunas) {
+        foreach ($logs as $i => $row) {
+            $id = (int) ($row["id"] ?? 0);
+            $st = trim((string) ($row["status"] ?? ""));
+            if ($id !== $newLogId && $st === "lunas") {
+                $start = $i + 1;
+            }
+        }
+    }
+    $ranges = [];
+    $slice = array_slice($logs, $start);
+    foreach ($slice as $row) {
+        $ranges[] = [
+            "dari" => (int) ($row["ayat_dari"] ?? 0),
+            "sampai" => (int) ($row["ayat_sampai"] ?? 0),
+        ];
+    }
+    return $ranges;
+}
+
+function tahfidClearSetoranIfNotLunas(PDO $pdo, string $custid, int $detailId, string $status): void
+{
+    if ($status === "lunas") {
+        return;
+    }
+    $del = $pdo->prepare("DELETE FROM aka_tahfid_setoran WHERE custid = :c AND jadwal_detail_id = :d LIMIT 1");
+    $del->bindValue(":c", $custid, PDO::PARAM_STR);
+    $del->bindValue(":d", $detailId, PDO::PARAM_INT);
+    $del->execute();
+}
+
+function tahfidMarkSetoranIfLunas(PDO $pdo, array $siswa, int $detailId, string $status): void
+{
+    if ($status !== "lunas") {
+        return;
+    }
+    try {
+        $ins = $pdo->prepare("
+            INSERT INTO aka_tahfid_setoran
+                (custid, nocust, nmcust, code01, kelas, jadwal_detail_id, status, created_at)
+            VALUES
+                (:custid, :nocust, :nmcust, :code01, :kelas, :did, 'setor', NOW())
+        ");
+        $ins->bindValue(":custid", (string) $siswa["custid"], PDO::PARAM_STR);
+        $ins->bindValue(":nocust", (string) $siswa["nocust"], PDO::PARAM_STR);
+        $ins->bindValue(":nmcust", (string) $siswa["nmcust"], PDO::PARAM_STR);
+        $ins->bindValue(":code01", (string) $siswa["code01"], PDO::PARAM_STR);
+        $ins->bindValue(":kelas", (string) $siswa["kelas"], PDO::PARAM_STR);
+        $ins->bindValue(":did", $detailId, PDO::PARAM_INT);
+        $ins->execute();
+    } catch (Throwable $e) {
+        if (stripos($e->getMessage(), "Duplicate") === false) {
+            throw $e;
+        }
+    }
+}
+
+function tahfidSiswaBolehAksesDetail(PDO $pdo, array $siswa, array $detailRow): bool
+{
+    $code01 = trim((string) $siswa["code01"]);
+    $kelas = trim((string) $siswa["kelas"]);
+    $custid = trim((string) $siswa["custid"]);
+    if (trim((string) $detailRow["code01"]) !== $code01) {
+        return false;
+    }
+    $jadwalKelas = trim((string) $detailRow["kelas"]);
+    if ($jadwalKelas === $kelas) {
+        return true;
+    }
+    $cek = $pdo->prepare("SELECT id FROM aka_tahfid_percepatan WHERE custid = :c AND kelas_tujuan = :k LIMIT 1");
+    $cek->bindValue(":c", $custid, PDO::PARAM_STR);
+    $cek->bindValue(":k", $jadwalKelas, PDO::PARAM_STR);
+    $cek->execute();
+    return (int) ($cek->fetchColumn() ?: 0) > 0;
+}
+
+function tahfidUpsertProgress(
+    PDO $pdo,
+    array $siswa,
+    int $detailId,
+    int $ayatDari,
+    int $ayatSampai,
+    bool $forceLunas,
+    string $catatan,
+    string $by
+): array {
+    $detail = $pdo->prepare("
+        SELECT d.id, d.ayat_dari, d.ayat_sampai, d.is_lengkap, d.surah_nomor, d.surah_nama, j.code01, j.kelas
+        FROM aka_tahfid_jadwal_detail d
+        INNER JOIN aka_tahfid_jadwal j ON j.id = d.jadwal_id
+        WHERE d.id = :id
+        LIMIT 1
+    ");
+    $detail->bindValue(":id", $detailId, PDO::PARAM_INT);
+    $detail->execute();
+    $row = $detail->fetch();
+    if (!is_array($row)) {
+        fail(404, "Item jadwal tidak ditemukan");
+    }
+    if (!tahfidSiswaBolehAksesDetail($pdo, $siswa, $row)) {
+        fail(403, "Siswi ini tidak memiliki jadwal surat tersebut");
+    }
+    $targetDari = (int) ($row["ayat_dari"] ?? 1);
+    $targetSampai = (int) ($row["ayat_sampai"] ?? $targetDari);
+    if ($targetSampai < $targetDari) {
+        $targetSampai = $targetDari;
+    }
+    if ($forceLunas) {
+        $ayatDari = $targetDari;
+        $ayatSampai = $targetSampai;
+    }
+    if ($ayatDari < $targetDari || $ayatSampai > $targetSampai || $ayatSampai < $ayatDari) {
+        fail(422, "Rentang ayat harus di dalam target jadwal (ayat " . $targetDari . "–" . $targetSampai . ")");
+    }
+    $catatan = mb_substr(trim($catatan), 0, 500);
+    $custid = trim((string) $siswa["custid"]);
+
+    $find = $pdo->prepare("SELECT id, status FROM aka_tahfid_progress WHERE custid = :c AND jadwal_detail_id = :d LIMIT 1");
+    $find->bindValue(":c", $custid, PDO::PARAM_STR);
+    $find->bindValue(":d", $detailId, PDO::PARAM_INT);
+    $find->execute();
+    $existing = $find->fetch();
+    $progressId = is_array($existing) ? (int) $existing["id"] : 0;
+
+    if ($progressId < 1) {
+        $ins = $pdo->prepare("
+            INSERT INTO aka_tahfid_progress
+                (custid, nocust, nmcust, code01, kelas, jadwal_detail_id, ayat_dari, ayat_sampai, status, catatan,
+                 created_by, updated_by, created_at, updated_at)
+            VALUES
+                (:custid, :nocust, :nmcust, :code01, :kelas, :did, :ad, :as, 'proses', :cat,
+                 :by1, :by2, NOW(), NOW())
+        ");
+        $ins->bindValue(":custid", $custid, PDO::PARAM_STR);
+        $ins->bindValue(":nocust", (string) $siswa["nocust"], PDO::PARAM_STR);
+        $ins->bindValue(":nmcust", (string) $siswa["nmcust"], PDO::PARAM_STR);
+        $ins->bindValue(":code01", (string) $siswa["code01"], PDO::PARAM_STR);
+        $ins->bindValue(":kelas", (string) $siswa["kelas"], PDO::PARAM_STR);
+        $ins->bindValue(":did", $detailId, PDO::PARAM_INT);
+        $ins->bindValue(":ad", $ayatDari, PDO::PARAM_INT);
+        $ins->bindValue(":as", $ayatSampai, PDO::PARAM_INT);
+        $ins->bindValue(":cat", $catatan, PDO::PARAM_STR);
+        $ins->bindValue(":by1", $by, PDO::PARAM_STR);
+        $ins->bindValue(":by2", $by, PDO::PARAM_STR);
+        $ins->execute();
+        $progressId = (int) $pdo->lastInsertId();
+    }
+
+    $log = $pdo->prepare("
+        INSERT INTO aka_tahfid_progress_log
+            (progress_id, jadwal_detail_id, custid, ayat_dari, ayat_sampai, status, catatan, created_by, created_at)
+        VALUES
+            (:pid, :did, :custid, :ad, :as, 'proses', :cat, :by, NOW())
+    ");
+    $log->bindValue(":pid", $progressId, PDO::PARAM_INT);
+    $log->bindValue(":did", $detailId, PDO::PARAM_INT);
+    $log->bindValue(":custid", $custid, PDO::PARAM_STR);
+    $log->bindValue(":ad", $ayatDari, PDO::PARAM_INT);
+    $log->bindValue(":as", $ayatSampai, PDO::PARAM_INT);
+    $log->bindValue(":cat", $catatan, PDO::PARAM_STR);
+    $log->bindValue(":by", $by, PDO::PARAM_STR);
+    $log->execute();
+    $logId = (int) $pdo->lastInsertId();
+
+    $logs = tahfidFetchAllProgressRanges($pdo, $custid, $detailId);
+    $summary = tahfidSummarizeCoverage(
+        tahfidActiveRangesForStatus($logs, $forceLunas, $logId),
+        $targetDari,
+        $targetSampai
+    );
+    if ($forceLunas) {
+        $summary["status"] = "lunas";
+        $summary["ayat_dari"] = $targetDari;
+        $summary["ayat_sampai"] = $targetSampai;
+        $summary["progress_label"] = tahfidAyatLabel(true, $targetDari, $targetSampai);
+    } else {
+        $summary["status"] = "proses";
+        $summary["ayat_dari"] = $ayatDari;
+        $summary["ayat_sampai"] = $ayatSampai;
+        $summary["progress_label"] = "Ayat " . $ayatDari . "–" . $ayatSampai;
+    }
+
+    $upd = $pdo->prepare("
+        UPDATE aka_tahfid_progress
+        SET ayat_dari = :ad, ayat_sampai = :as, status = :st, catatan = :cat,
+            nocust = :nocust, nmcust = :nmcust, code01 = :code01, kelas = :kelas,
+            updated_by = :by, updated_at = NOW()
+        WHERE id = :id LIMIT 1
+    ");
+    $upd->bindValue(":ad", (int) $summary["ayat_dari"], PDO::PARAM_INT);
+    $upd->bindValue(":as", (int) $summary["ayat_sampai"], PDO::PARAM_INT);
+    $upd->bindValue(":st", $summary["status"], PDO::PARAM_STR);
+    $upd->bindValue(":cat", $catatan, PDO::PARAM_STR);
+    $upd->bindValue(":nocust", (string) $siswa["nocust"], PDO::PARAM_STR);
+    $upd->bindValue(":nmcust", (string) $siswa["nmcust"], PDO::PARAM_STR);
+    $upd->bindValue(":code01", (string) $siswa["code01"], PDO::PARAM_STR);
+    $upd->bindValue(":kelas", (string) $siswa["kelas"], PDO::PARAM_STR);
+    $upd->bindValue(":by", $by, PDO::PARAM_STR);
+    $upd->bindValue(":id", $progressId, PDO::PARAM_INT);
+    $upd->execute();
+
+    if ($summary["status"] === "lunas") {
+        if ($logId > 0) {
+            $fix = $pdo->prepare("UPDATE aka_tahfid_progress_log SET status = 'lunas' WHERE id = :id LIMIT 1");
+            $fix->bindValue(":id", $logId, PDO::PARAM_INT);
+            $fix->execute();
+        }
+        tahfidMarkSetoranIfLunas($pdo, $siswa, $detailId, "lunas");
+    } else {
+        tahfidClearSetoranIfNotLunas($pdo, $custid, $detailId, $summary["status"]);
+    }
+
+    $nama = trim((string) ($row["surah_nama"] ?? "Surat"));
+    $msg = $summary["status"] === "lunas"
+        ? ($nama . " lunas / selesai")
+        : ("Progress " . $nama . " tercatat (" . ($summary["progress_label"] ?: ("ayat " . $ayatDari . "–" . $ayatSampai)) . ")");
+    return [
+        "progress_id" => $progressId,
+        "status" => $summary["status"],
+        "message" => $msg,
+    ];
+}
+
+function ensureTahfidTables(PDO $pdo): void
+{
+    static $ready = false;
+    if ($ready) {
+        return;
+    }
+    try {
+        $pdo->query("SELECT id FROM aka_tahfid_jadwal LIMIT 0");
+        $pdo->query("SELECT id FROM aka_tahfid_jadwal_detail LIMIT 0");
+        $pdo->query("SELECT id FROM aka_tahfid_percepatan LIMIT 0");
+        $pdo->query("SELECT id FROM aka_tahfid_setoran LIMIT 0");
+        ensureTahfidJadwalCode03($pdo);
+        ensureTahfidProgressTables($pdo);
+        $ready = true;
+        return;
+    } catch (Throwable) {
+        // Tabel belum lengkap.
+    }
+    try {
+        $pdo->exec("
+            CREATE TABLE IF NOT EXISTS aka_tahfid_jadwal (
+                id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                code01 VARCHAR(20) NOT NULL,
+                kelas VARCHAR(80) NOT NULL,
+                code03 VARCHAR(20) NOT NULL DEFAULT '',
+                created_by VARCHAR(50) NOT NULL DEFAULT '',
+                updated_by VARCHAR(50) NOT NULL DEFAULT '',
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL,
+                PRIMARY KEY (id),
+                UNIQUE KEY uk_unit_kelas (code01, kelas),
+                KEY idx_code01 (code01),
+                KEY idx_code03 (code03)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+        $pdo->exec("
+            CREATE TABLE IF NOT EXISTS aka_tahfid_jadwal_detail (
+                id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                jadwal_id INT UNSIGNED NOT NULL,
+                urut INT NOT NULL DEFAULT 1,
+                surah_nomor TINYINT UNSIGNED NOT NULL,
+                surah_nama VARCHAR(80) NOT NULL DEFAULT '',
+                juz_dari TINYINT UNSIGNED NOT NULL DEFAULT 1,
+                juz_sampai TINYINT UNSIGNED NOT NULL DEFAULT 1,
+                is_lengkap TINYINT(1) NOT NULL DEFAULT 1,
+                ayat_dari SMALLINT UNSIGNED NULL DEFAULT NULL,
+                ayat_sampai SMALLINT UNSIGNED NULL DEFAULT NULL,
+                PRIMARY KEY (id),
+                KEY idx_jadwal (jadwal_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+        $pdo->exec("
+            CREATE TABLE IF NOT EXISTS aka_tahfid_percepatan (
+                id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                custid VARCHAR(50) NOT NULL,
+                nocust VARCHAR(50) NOT NULL,
+                nmcust VARCHAR(150) NOT NULL DEFAULT '',
+                code01 VARCHAR(20) NOT NULL DEFAULT '',
+                kelas_asal VARCHAR(80) NOT NULL DEFAULT '',
+                kelas_tujuan VARCHAR(80) NOT NULL,
+                created_by VARCHAR(50) NOT NULL DEFAULT '',
+                created_at DATETIME NOT NULL,
+                PRIMARY KEY (id),
+                UNIQUE KEY uk_siswa_tujuan (custid, kelas_tujuan),
+                KEY idx_custid (custid),
+                KEY idx_code01 (code01)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+        $pdo->exec("
+            CREATE TABLE IF NOT EXISTS aka_tahfid_setoran (
+                id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                custid VARCHAR(50) NOT NULL,
+                nocust VARCHAR(50) NOT NULL DEFAULT '',
+                nmcust VARCHAR(150) NOT NULL DEFAULT '',
+                code01 VARCHAR(20) NOT NULL DEFAULT '',
+                kelas VARCHAR(80) NOT NULL DEFAULT '',
+                jadwal_detail_id INT UNSIGNED NOT NULL,
+                status VARCHAR(20) NOT NULL DEFAULT 'setor',
+                created_at DATETIME NOT NULL,
+                PRIMARY KEY (id),
+                UNIQUE KEY uk_siswa_detail (custid, jadwal_detail_id),
+                KEY idx_custid (custid),
+                KEY idx_detail (jadwal_detail_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+        ensureTahfidJadwalCode03($pdo);
+        ensureTahfidProgressTables($pdo);
+        $ready = true;
+    } catch (Throwable $e) {
+        $msg = $e->getMessage();
+        if (stripos($msg, "already exists") !== false) {
+            ensureTahfidJadwalCode03($pdo);
+            ensureTahfidProgressTables($pdo);
+            $ready = true;
+            return;
+        }
+        writeLog("TAHFID_CREATE_FAIL", ["message" => $msg]);
+        fail(500, "Tabel tahfid belum ada. Jalankan ws/sql/aka_tahfid.sql");
+    }
+}
+
+function tahfidResolveStaffCode01(array $auth, string $requested): string
+{
+    $own = staffUnitCode01($auth);
+    $requested = trim($requested);
+    if ($own !== "") {
+        return $own;
+    }
+    return $requested;
+}
+
+function mapTahfidDetailRow(array $row): array
+{
+    $lengkap = ((int) ($row["is_lengkap"] ?? 1)) === 1;
+    $dari = (int) ($row["ayat_dari"] ?? 1);
+    $sampai = (int) ($row["ayat_sampai"] ?? $dari);
+    $juzDari = (int) ($row["juz_dari"] ?? 1);
+    $juzSampai = (int) ($row["juz_sampai"] ?? $juzDari);
+    return [
+        "id" => (int) ($row["id"] ?? 0),
+        "jadwal_id" => (int) ($row["jadwal_id"] ?? 0),
+        "urut" => (int) ($row["urut"] ?? 1),
+        "surah_nomor" => (int) ($row["surah_nomor"] ?? 0),
+        "surah_nama" => trim((string) ($row["surah_nama"] ?? "")),
+        "juz_dari" => $juzDari,
+        "juz_sampai" => $juzSampai,
+        "juz_label" => tahfidJuzLabel($juzDari, $juzSampai),
+        "is_lengkap" => $lengkap,
+        "ayat_dari" => $dari,
+        "ayat_sampai" => $sampai,
+        "ayat_label" => tahfidAyatLabel($lengkap, $dari, $sampai),
+        "kelas_sumber" => trim((string) ($row["kelas_sumber"] ?? "")),
+        "sumber" => trim((string) ($row["sumber"] ?? "")),
+        "sudah_setor" => ((int) ($row["sudah_setor"] ?? 0)) === 1,
+        "setor_at" => trim((string) ($row["setor_at"] ?? "")),
+        "progress_status" => trim((string) ($row["progress_status"] ?? "")),
+        "progress_status_label" => tahfidProgressStatusLabel(trim((string) ($row["progress_status"] ?? ""))),
+        "progress_ayat_dari" => (int) ($row["progress_ayat_dari"] ?? 0),
+        "progress_ayat_sampai" => (int) ($row["progress_ayat_sampai"] ?? 0),
+        "progress_label" => trim((string) ($row["progress_label"] ?? "")),
+        "progress_catatan" => trim((string) ($row["progress_catatan"] ?? "")),
+        "progress_at" => trim((string) ($row["progress_at"] ?? "")),
+        "logs" => is_array($row["logs"] ?? null) ? $row["logs"] : [],
+    ];
+}
+
+function tahfidFetchDetails(PDO $pdo, int $jadwalId): array
+{
+    $stmt = $pdo->prepare("
+        SELECT id, jadwal_id, urut, surah_nomor, surah_nama, juz_dari, juz_sampai, is_lengkap, ayat_dari, ayat_sampai
+        FROM aka_tahfid_jadwal_detail
+        WHERE jadwal_id = :id
+        ORDER BY urut ASC, id ASC
+    ");
+    $stmt->bindValue(":id", $jadwalId, PDO::PARAM_INT);
+    $stmt->execute();
+    $items = [];
+    foreach ($stmt->fetchAll() ?: [] as $row) {
+        if (is_array($row)) {
+            $items[] = mapTahfidDetailRow($row);
+        }
+    }
+    return $items;
+}
+
+function tahfidFetchJadwal(PDO $pdo, int $id, string $userCode01): ?array
+{
+    $sql = "
+        SELECT j.id, j.code01, j.kelas, j.code03, j.created_by, j.updated_by, j.created_at, j.updated_at,
+               TRIM(ms.DESC01) AS sekolah
+        FROM aka_tahfid_jadwal j
+        LEFT JOIN mst_sekolah ms ON ms.CODE01 = j.code01
+        WHERE j.id = :id
+          AND (:code01_empty = '' OR j.code01 = :code01_value)
+        LIMIT 1
+    ";
+    $stmt = $pdo->prepare($sql);
+    $stmt->bindValue(":id", $id, PDO::PARAM_INT);
+    $stmt->bindValue(":code01_empty", $userCode01, PDO::PARAM_STR);
+    $stmt->bindValue(":code01_value", $userCode01, PDO::PARAM_STR);
+    $stmt->execute();
+    $row = $stmt->fetch();
+    if (!$row) {
+        return null;
+    }
+    $item = [
+        "id" => (int) $row["id"],
+        "code01" => trim((string) $row["code01"]),
+        "sekolah" => trim((string) ($row["sekolah"] ?? "")),
+        "kelas" => trim((string) $row["kelas"]),
+        "code03" => trim((string) ($row["code03"] ?? "")),
+        "created_by" => trim((string) ($row["created_by"] ?? "")),
+        "updated_by" => trim((string) ($row["updated_by"] ?? "")),
+        "created_at" => trim((string) ($row["created_at"] ?? "")),
+        "updated_at" => trim((string) ($row["updated_at"] ?? "")),
+    ];
+    $item["details"] = tahfidFetchDetails($pdo, $item["id"]);
+    return $item;
+}
+
+function tahfidParseDetails(array $req): array
+{
+    $raw = $req["details"] ?? [];
+    if (is_string($raw)) {
+        $decoded = json_decode($raw, true);
+        $raw = is_array($decoded) ? $decoded : [];
+    }
+    if (!is_array($raw) || count($raw) === 0) {
+        fail(422, "Jadwal harus berisi minimal satu surat");
+    }
+    $items = [];
+    $urut = 0;
+    foreach ($raw as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $nomor = (int) ($row["surah_nomor"] ?? 0);
+        $maxAyat = quranSurahAyatCount($nomor);
+        if ($maxAyat < 1) {
+            fail(422, "Nomor surat tidak valid");
+        }
+        $nama = trim((string) ($row["surah_nama"] ?? ""));
+        if ($nama === "") {
+            $nama = "Surat " . $nomor;
+        }
+        $nama = mb_substr($nama, 0, 80);
+        $lengkap = !empty($row["is_lengkap"]);
+        $dari = $lengkap ? 1 : (int) ($row["ayat_dari"] ?? 0);
+        $sampai = $lengkap ? $maxAyat : (int) ($row["ayat_sampai"] ?? 0);
+        if ($dari < 1 || $sampai < $dari || $sampai > $maxAyat) {
+            fail(422, "Rentang ayat " . $nama . " tidak valid (1–" . $maxAyat . ")");
+        }
+        $urut++;
+        $items[] = [
+            "urut" => $urut,
+            "surah_nomor" => $nomor,
+            "surah_nama" => $nama,
+            "is_lengkap" => $lengkap ? 1 : 0,
+            "ayat_dari" => $dari,
+            "ayat_sampai" => $sampai,
+            "juz_dari" => quranJuzForAyah($nomor, $dari),
+            "juz_sampai" => quranJuzForAyah($nomor, $sampai),
+        ];
+    }
+    if (count($items) === 0) {
+        fail(422, "Jadwal harus berisi minimal satu surat");
+    }
+    return $items;
+}
+
+function tahfidMstKelasHasCode03(PDO $pdo): bool
+{
+    static $has = null;
+    if ($has !== null) {
+        return $has;
+    }
+    try {
+        $pdo->query("SELECT code03 FROM mst_kelas LIMIT 0");
+        $has = true;
+    } catch (Throwable) {
+        $has = false;
+    }
+    return $has;
+}
+
+function tahfidMapMstKelasRow(array $row): array
+{
+    $id = (int) ($row["id"] ?? 0);
+    $jenjang = trim((string) ($row["jenjang"] ?? ""));
+    $rombel = trim((string) ($row["kelas"] ?? ""));
+    $nama = $jenjang !== "" ? $jenjang : $rombel;
+    $code03 = trim((string) ($row["code03"] ?? ""));
+    if ($code03 === "" && $id > 0) {
+        $code03 = (string) $id;
+    }
+    return [
+        "id" => $id,
+        "code03" => $code03,
+        "kelas" => $nama,
+        "rombel" => $rombel,
+    ];
+}
+
+function tahfidSekolahUnitAliases(PDO $pdo, string $code01): array
+{
+    $aliases = [strtoupper(trim($code01))];
+    $stmt = $pdo->prepare("SELECT TRIM(CODE01) AS code01, TRIM(DESC01) AS sekolah FROM mst_sekolah WHERE CODE01 = :c LIMIT 1");
+    $stmt->bindValue(":c", $code01, PDO::PARAM_STR);
+    $stmt->execute();
+    $row = $stmt->fetch();
+    if (is_array($row)) {
+        $name = trim((string) ($row["sekolah"] ?? ""));
+        if ($name !== "") {
+            $aliases[] = strtoupper($name);
+            if (preg_match('/^[A-Za-z]+/', $name, $m)) {
+                $aliases[] = strtoupper($m[0]);
+            }
+        }
+    }
+    return array_values(array_unique(array_filter($aliases, static fn ($v) => $v !== "")));
+}
+
+function tahfidListKelas(PDO $pdo, string $code01): array
+{
+    $code01 = trim($code01);
+    if ($code01 === "") {
+        return [];
+    }
+    $aliases = tahfidSekolahUnitAliases($pdo, $code01);
+    if (count($aliases) === 0) {
+        return [];
+    }
+    $placeholders = [];
+    $bind = [];
+    foreach ($aliases as $i => $alias) {
+        $key = ":u" . $i;
+        $placeholders[] = $key;
+        $bind[$key] = $alias;
+    }
+    $code03Col = tahfidMstKelasHasCode03($pdo) ? ", TRIM(k.code03) AS code03" : "";
+    $sql = "
+        SELECT k.id, TRIM(k.kelas) AS kelas, TRIM(k.jenjang) AS jenjang, TRIM(k.unit) AS unit
+               {$code03Col}
+        FROM mst_kelas k
+        WHERE UPPER(TRIM(k.unit)) IN (" . implode(", ", $placeholders) . ")
+          AND (TRIM(IFNULL(k.jenjang, '')) <> '' OR TRIM(IFNULL(k.kelas, '')) <> '')
+        ORDER BY k.jenjang ASC, k.kelas ASC, k.id ASC
+    ";
+    try {
+        $stmt = $pdo->prepare($sql);
+        foreach ($bind as $key => $val) {
+            $stmt->bindValue($key, $val, PDO::PARAM_STR);
+        }
+        $stmt->execute();
+    } catch (Throwable $e) {
+        writeLog("TAHFID_MST_KELAS_FAIL", ["message" => $e->getMessage(), "code01" => $code01]);
+        fail(500, "Tabel mst_kelas belum bisa dibaca. Periksa kolom id, kelas, jenjang, unit.");
+    }
+    $items = [];
+    $seen = [];
+    foreach ($stmt->fetchAll() ?: [] as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $mapped = tahfidMapMstKelasRow($row);
+        if ($mapped["id"] < 1 || $mapped["kelas"] === "") {
+            continue;
+        }
+        $key = $mapped["code03"] !== "" ? $mapped["code03"] : (string) $mapped["id"];
+        if (isset($seen[$key])) {
+            continue;
+        }
+        $seen[$key] = true;
+        $items[] = $mapped;
+    }
+    return $items;
+}
+
+function tahfidResolveSelectedKelas(PDO $pdo, string $code01, array $req): array
+{
+    $raw = $req["kelas_id"] ?? $req["kelas"] ?? [];
+    if (is_string($raw)) {
+        $decoded = json_decode($raw, true);
+        $raw = is_array($decoded) ? $decoded : preg_split('/\s*,\s*/', $raw);
+    }
+    if (!is_array($raw)) {
+        $raw = [];
+    }
+    $ids = [];
+    $names = [];
+    foreach ($raw as $row) {
+        if (is_array($row)) {
+            $id = (int) ($row["id"] ?? $row["code03"] ?? 0);
+            $name = trim((string) ($row["kelas"] ?? $row["nama"] ?? ""));
+        } else {
+            $text = trim((string) $row);
+            $id = ctype_digit($text) ? (int) $text : 0;
+            $name = $id > 0 ? "" : $text;
+        }
+        if ($id > 0) {
+            $ids[$id] = $id;
+        } elseif ($name !== "") {
+            $names[mb_strtoupper($name)] = $name;
+        }
+    }
+    $all = tahfidListKelas($pdo, $code01);
+    $byId = [];
+    $byName = [];
+    foreach ($all as $row) {
+        $byId[(int) $row["id"]] = $row;
+        $code03 = (int) ($row["code03"] ?? 0);
+        if ($code03 > 0) {
+            $byId[$code03] = $row;
+        }
+        $byName[mb_strtoupper((string) $row["kelas"])] = $row;
+    }
+    $selected = [];
+    $seen = [];
+    foreach ($ids as $id) {
+        if (!isset($byId[$id])) {
+            fail(422, "Kelas tidak valid untuk unit ini");
+        }
+        $key = (string) $byId[$id]["id"];
+        if (isset($seen[$key])) {
+            continue;
+        }
+        $seen[$key] = true;
+        $selected[] = $byId[$id];
+    }
+    foreach ($names as $upper => $_name) {
+        if (!isset($byName[$upper])) {
+            fail(422, "Kelas tidak ditemukan di master kelas unit ini");
+        }
+        $key = (string) $byName[$upper]["id"];
+        if (isset($seen[$key])) {
+            continue;
+        }
+        $seen[$key] = true;
+        $selected[] = $byName[$upper];
+    }
+    if (count($selected) === 0) {
+        fail(422, "Pilih minimal satu kelas dari master kelas");
+    }
+    return $selected;
+}
+
+function tahfidUpsertJadwal(PDO $pdo, string $code01, string $kelas, string $code03, array $details, string $by): int
+{
+    $existingId = 0;
+    if ($code03 !== "") {
+        $find = $pdo->prepare("SELECT id FROM aka_tahfid_jadwal WHERE code01 = :c AND code03 = :k LIMIT 1");
+        $find->bindValue(":c", $code01, PDO::PARAM_STR);
+        $find->bindValue(":k", $code03, PDO::PARAM_STR);
+        $find->execute();
+        $existingId = (int) ($find->fetchColumn() ?: 0);
+    }
+    if ($existingId < 1) {
+        $find = $pdo->prepare("SELECT id FROM aka_tahfid_jadwal WHERE code01 = :c AND kelas = :k LIMIT 1");
+        $find->bindValue(":c", $code01, PDO::PARAM_STR);
+        $find->bindValue(":k", $kelas, PDO::PARAM_STR);
+        $find->execute();
+        $existingId = (int) ($find->fetchColumn() ?: 0);
+    }
+    if ($existingId > 0) {
+        $upd = $pdo->prepare("
+            UPDATE aka_tahfid_jadwal
+            SET kelas = :kelas, code03 = :code03, updated_by = :by, updated_at = NOW()
+            WHERE id = :id LIMIT 1
+        ");
+        $upd->bindValue(":kelas", $kelas, PDO::PARAM_STR);
+        $upd->bindValue(":code03", $code03, PDO::PARAM_STR);
+        $upd->bindValue(":by", $by, PDO::PARAM_STR);
+        $upd->bindValue(":id", $existingId, PDO::PARAM_INT);
+        $upd->execute();
+        tahfidReplaceDetails($pdo, $existingId, $details);
+        return $existingId;
+    }
+
+    $ins = $pdo->prepare("
+        INSERT INTO aka_tahfid_jadwal (code01, kelas, code03, created_by, updated_by, created_at, updated_at)
+        VALUES (:code01, :kelas, :code03, :by1, :by2, NOW(), NOW())
+    ");
+    $ins->bindValue(":code01", $code01, PDO::PARAM_STR);
+    $ins->bindValue(":kelas", $kelas, PDO::PARAM_STR);
+    $ins->bindValue(":code03", $code03, PDO::PARAM_STR);
+    $ins->bindValue(":by1", $by, PDO::PARAM_STR);
+    $ins->bindValue(":by2", $by, PDO::PARAM_STR);
+    $ins->execute();
+    $newId = (int) $pdo->lastInsertId();
+    tahfidReplaceDetails($pdo, $newId, $details);
+    return $newId;
+}
+
+function tahfidFetchSiswaLive(PDO $pdo, string $custid): ?array
+{
+    $stmt = $pdo->prepare("
+        SELECT
+            TRIM(c.CUSTID) AS custid,
+            TRIM(c.NOCUST) AS nocust,
+            TRIM(c.NMCUST) AS nmcust,
+            TRIM(c.DESC02) AS kelas,
+            TRIM(c.CODE01) AS code01,
+            TRIM(ms.DESC01) AS sekolah
+        FROM scctcust c
+        LEFT JOIN mst_sekolah ms ON ms.CODE01 = c.CODE01
+        WHERE TRIM(c.CUSTID) = :custid
+        LIMIT 1
+    ");
+    $stmt->bindValue(":custid", $custid, PDO::PARAM_STR);
+    $stmt->execute();
+    $row = $stmt->fetch();
+    return $row ?: null;
+}
+
+function tahfidReplaceDetails(PDO $pdo, int $jadwalId, array $details): void
+{
+    $old = $pdo->prepare("SELECT id FROM aka_tahfid_jadwal_detail WHERE jadwal_id = :id");
+    $old->bindValue(":id", $jadwalId, PDO::PARAM_INT);
+    $old->execute();
+    $ids = [];
+    foreach ($old->fetchAll() ?: [] as $row) {
+        $ids[] = (int) ($row["id"] ?? 0);
+    }
+    if (count($ids) > 0) {
+        $in = implode(",", array_fill(0, count($ids), "?"));
+        $delSetor = $pdo->prepare("DELETE FROM aka_tahfid_setoran WHERE jadwal_detail_id IN ($in)");
+        $delSetor->execute($ids);
+    }
+    $del = $pdo->prepare("DELETE FROM aka_tahfid_jadwal_detail WHERE jadwal_id = :id");
+    $del->bindValue(":id", $jadwalId, PDO::PARAM_INT);
+    $del->execute();
+
+    $ins = $pdo->prepare("
+        INSERT INTO aka_tahfid_jadwal_detail
+            (jadwal_id, urut, surah_nomor, surah_nama, juz_dari, juz_sampai, is_lengkap, ayat_dari, ayat_sampai)
+        VALUES
+            (:jadwal_id, :urut, :surah_nomor, :surah_nama, :juz_dari, :juz_sampai, :is_lengkap, :ayat_dari, :ayat_sampai)
+    ");
+    foreach ($details as $row) {
+        $ins->bindValue(":jadwal_id", $jadwalId, PDO::PARAM_INT);
+        $ins->bindValue(":urut", (int) $row["urut"], PDO::PARAM_INT);
+        $ins->bindValue(":surah_nomor", (int) $row["surah_nomor"], PDO::PARAM_INT);
+        $ins->bindValue(":surah_nama", (string) $row["surah_nama"], PDO::PARAM_STR);
+        $ins->bindValue(":juz_dari", (int) $row["juz_dari"], PDO::PARAM_INT);
+        $ins->bindValue(":juz_sampai", (int) $row["juz_sampai"], PDO::PARAM_INT);
+        $ins->bindValue(":is_lengkap", (int) $row["is_lengkap"], PDO::PARAM_INT);
+        $ins->bindValue(":ayat_dari", (int) $row["ayat_dari"], PDO::PARAM_INT);
+        $ins->bindValue(":ayat_sampai", (int) $row["ayat_sampai"], PDO::PARAM_INT);
+        $ins->execute();
+    }
+}
+
+function doManageTahfid(array $req, array $auth): array
+{
+    $action = strtolower(trim((string) ($req["action"] ?? "list")));
+    $pdo = dbConnectPdo();
+    ensureTahfidTables($pdo);
+
+    $siswaActions = ["myjadwal", "submitsetoran"];
+    if (in_array($action, $siswaActions, true)) {
+        if (!tahfidIsSiswaAuth($auth)) {
+            fail(403, "Aksi ini hanya untuk siswa");
+        }
+        if ($action === "myjadwal") {
+            return tahfidMyJadwal($pdo, $auth);
+        }
+        return tahfidSubmitSetoran($pdo, $req, $auth);
+    }
+
+    assertApprovalRole($auth);
+    $userCode01 = staffUnitCode01($auth);
+    $by = approvalStaffUsername($auth);
+
+    if ($action === "list" || $action === "listjadwal") {
+        $filterCode = tahfidResolveStaffCode01($auth, (string) ($req["code01"] ?? ""));
+        $sql = "
+            SELECT j.id, j.code01, j.kelas, j.code03, j.created_by, j.updated_at,
+                   TRIM(ms.DESC01) AS sekolah,
+                   (SELECT COUNT(*) FROM aka_tahfid_jadwal_detail d WHERE d.jadwal_id = j.id) AS jumlah_surat
+            FROM aka_tahfid_jadwal j
+            LEFT JOIN mst_sekolah ms ON ms.CODE01 = j.code01
+            WHERE (:code01_empty = '' OR j.code01 = :code01_value)
+            ORDER BY ms.DESC01 ASC, j.kelas ASC
+        ";
+        $stmt = $pdo->prepare($sql);
+        $stmt->bindValue(":code01_empty", $filterCode, PDO::PARAM_STR);
+        $stmt->bindValue(":code01_value", $filterCode, PDO::PARAM_STR);
+        $stmt->execute();
+        $items = [];
+        foreach ($stmt->fetchAll() ?: [] as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $items[] = [
+                "id" => (int) $row["id"],
+                "code01" => trim((string) $row["code01"]),
+                "sekolah" => trim((string) ($row["sekolah"] ?? "")),
+                "kelas" => trim((string) $row["kelas"]),
+                "code03" => trim((string) ($row["code03"] ?? "")),
+                "jumlah_surat" => (int) ($row["jumlah_surat"] ?? 0),
+                "updated_at" => trim((string) ($row["updated_at"] ?? "")),
+                "created_by" => trim((string) ($row["created_by"] ?? "")),
+                "details" => tahfidFetchDetails($pdo, (int) $row["id"]),
+            ];
+        }
+        return [
+            "items" => $items,
+            "sekolah" => fetchSekolahMap($pdo),
+            "kelas" => $filterCode !== "" ? tahfidListKelas($pdo, $filterCode) : [],
+            "scope_sekolah" => $userCode01 !== "" ? fetchScopeSekolahName($pdo, $userCode01) : "",
+        ];
+    }
+
+    if ($action === "listkelas") {
+        $code01 = tahfidResolveStaffCode01($auth, (string) ($req["code01"] ?? ""));
+        if ($code01 === "") {
+            fail(422, "Pilih unit terlebih dahulu");
+        }
+        return ["kelas" => tahfidListKelas($pdo, $code01), "code01" => $code01];
+    }
+
+    if ($action === "get") {
+        $id = (int) ($req["id"] ?? 0);
+        if ($id < 1) {
+            fail(422, "ID jadwal tidak valid");
+        }
+        $item = tahfidFetchJadwal($pdo, $id, $userCode01);
+        if ($item === null) {
+            fail(404, "Jadwal tidak ditemukan");
+        }
+        return [
+            "item" => $item,
+            "sekolah" => fetchSekolahMap($pdo),
+            "kelas" => tahfidListKelas($pdo, $item["code01"]),
+            "scope_sekolah" => $userCode01 !== "" ? fetchScopeSekolahName($pdo, $userCode01) : "",
+        ];
+    }
+
+    if ($action === "save" || $action === "create" || $action === "update") {
+        $code01 = tahfidResolveStaffCode01($auth, (string) ($req["code01"] ?? ""));
+        if ($code01 === "" || !sekolahCodeExists($pdo, $code01)) {
+            fail(422, "Unit tidak valid");
+        }
+        $selectedKelas = tahfidResolveSelectedKelas($pdo, $code01, $req);
+        $details = tahfidParseDetails($req);
+        $ids = [];
+        $kelasNames = [];
+        foreach ($selectedKelas as $kelasRow) {
+            $kelas = trim((string) ($kelasRow["kelas"] ?? ""));
+            $code03 = trim((string) ($kelasRow["code03"] ?? ""));
+            if ($code03 === "" && (int) ($kelasRow["id"] ?? 0) > 0) {
+                $code03 = (string) $kelasRow["id"];
+            }
+            $ids[] = tahfidUpsertJadwal($pdo, $code01, $kelas, $code03, $details, $by);
+            $kelasNames[] = $kelas;
+        }
+        writeLog("TAHFID_JADWAL_SAVE", ["code01" => $code01, "kelas" => $kelasNames, "code03" => array_column($selectedKelas, "code03"), "by" => $by]);
+        $jumlah = count($selectedKelas);
+        return [
+            "id" => $ids[0] ?? 0,
+            "ids" => $ids,
+            "message" => $jumlah === 1
+                ? "Jadwal berhasil disimpan"
+                : "Jadwal berhasil disimpan untuk " . $jumlah . " kelas",
+        ];
+    }
+
+    if ($action === "delete") {
+        $id = (int) ($req["id"] ?? 0);
+        if ($id < 1) {
+            fail(422, "ID jadwal tidak valid");
+        }
+        $item = tahfidFetchJadwal($pdo, $id, $userCode01);
+        if ($item === null) {
+            fail(404, "Jadwal tidak ditemukan");
+        }
+        tahfidReplaceDetails($pdo, $id, []);
+        $del = $pdo->prepare("DELETE FROM aka_tahfid_jadwal WHERE id = :id LIMIT 1");
+        $del->bindValue(":id", $id, PDO::PARAM_INT);
+        $del->execute();
+        writeLog("TAHFID_JADWAL_DELETE", ["id" => $id, "by" => $by]);
+        return ["message" => "Jadwal dihapus"];
+    }
+
+    if ($action === "listpercepatan") {
+        $filterCode = tahfidResolveStaffCode01($auth, (string) ($req["code01"] ?? ""));
+        $sql = "
+            SELECT p.id, p.custid, p.nocust, p.nmcust, p.code01, p.kelas_asal, p.kelas_tujuan, p.created_by, p.created_at,
+                   TRIM(ms.DESC01) AS sekolah
+            FROM aka_tahfid_percepatan p
+            LEFT JOIN mst_sekolah ms ON ms.CODE01 = p.code01
+            WHERE (:code01_empty = '' OR p.code01 = :code01_value)
+            ORDER BY p.created_at DESC
+        ";
+        $stmt = $pdo->prepare($sql);
+        $stmt->bindValue(":code01_empty", $filterCode, PDO::PARAM_STR);
+        $stmt->bindValue(":code01_value", $filterCode, PDO::PARAM_STR);
+        $stmt->execute();
+        $items = [];
+        foreach ($stmt->fetchAll() ?: [] as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $items[] = [
+                "id" => (int) $row["id"],
+                "custid" => trim((string) $row["custid"]),
+                "nocust" => trim((string) $row["nocust"]),
+                "nmcust" => trim((string) $row["nmcust"]),
+                "code01" => trim((string) $row["code01"]),
+                "sekolah" => trim((string) ($row["sekolah"] ?? "")),
+                "kelas_asal" => trim((string) $row["kelas_asal"]),
+                "kelas_tujuan" => trim((string) $row["kelas_tujuan"]),
+                "created_by" => trim((string) ($row["created_by"] ?? "")),
+                "created_at" => trim((string) ($row["created_at"] ?? "")),
+            ];
+        }
+        $jadwalKelas = [];
+        if ($filterCode !== "") {
+            $jk = $pdo->prepare("SELECT TRIM(kelas) AS kelas FROM aka_tahfid_jadwal WHERE code01 = :c ORDER BY kelas ASC");
+            $jk->bindValue(":c", $filterCode, PDO::PARAM_STR);
+            $jk->execute();
+            foreach ($jk->fetchAll() ?: [] as $row) {
+                $k = trim((string) ($row["kelas"] ?? ""));
+                if ($k !== "") {
+                    $jadwalKelas[] = $k;
+                }
+            }
+        }
+        return [
+            "items" => $items,
+            "sekolah" => fetchSekolahMap($pdo),
+            "jadwal_kelas" => $jadwalKelas,
+            "scope_sekolah" => $userCode01 !== "" ? fetchScopeSekolahName($pdo, $userCode01) : "",
+        ];
+    }
+
+    if ($action === "savepercepatan") {
+        $nocust = trim((string) ($req["nis"] ?? $req["nocust"] ?? ""));
+        $kelasTujuan = trim((string) ($req["kelas_tujuan"] ?? ""));
+        if ($nocust === "" || !secure_validate_nocust($nocust)) {
+            fail(422, "NIS siswa tidak valid");
+        }
+        if ($kelasTujuan === "") {
+            fail(422, "Kelas tujuan wajib diisi");
+        }
+        $siswa = fetchSiswaByNocust($pdo, $nocust, $userCode01);
+        if (!$siswa) {
+            fail(422, "Siswa tidak ditemukan pada unit Anda");
+        }
+        $code01 = trim((string) $siswa["code01"]);
+        $kelasAsal = trim((string) $siswa["kelas"]);
+        if ($kelasTujuan === $kelasAsal) {
+            fail(422, "Kelas tujuan harus berbeda dari kelas siswa");
+        }
+        $hasJadwal = $pdo->prepare("SELECT id FROM aka_tahfid_jadwal WHERE code01 = :c AND kelas = :k LIMIT 1");
+        $hasJadwal->bindValue(":c", $code01, PDO::PARAM_STR);
+        $hasJadwal->bindValue(":k", $kelasTujuan, PDO::PARAM_STR);
+        $hasJadwal->execute();
+        if (!(int) ($hasJadwal->fetchColumn() ?: 0)) {
+            fail(422, "Kelas tujuan belum memiliki jadwal tahfid");
+        }
+        try {
+            $ins = $pdo->prepare("
+                INSERT INTO aka_tahfid_percepatan
+                    (custid, nocust, nmcust, code01, kelas_asal, kelas_tujuan, created_by, created_at)
+                VALUES
+                    (:custid, :nocust, :nmcust, :code01, :asal, :tujuan, :by, NOW())
+            ");
+            $ins->bindValue(":custid", (string) $siswa["custid"], PDO::PARAM_STR);
+            $ins->bindValue(":nocust", (string) $siswa["nocust"], PDO::PARAM_STR);
+            $ins->bindValue(":nmcust", (string) $siswa["nmcust"], PDO::PARAM_STR);
+            $ins->bindValue(":code01", $code01, PDO::PARAM_STR);
+            $ins->bindValue(":asal", $kelasAsal, PDO::PARAM_STR);
+            $ins->bindValue(":tujuan", $kelasTujuan, PDO::PARAM_STR);
+            $ins->bindValue(":by", $by, PDO::PARAM_STR);
+            $ins->execute();
+        } catch (Throwable $e) {
+            if (stripos($e->getMessage(), "Duplicate") !== false) {
+                fail(422, "Siswa ini sudah ditugaskan ke kelas tersebut");
+            }
+            throw $e;
+        }
+        writeLog("TAHFID_PERCEPATAN_CREATE", ["nocust" => $siswa["nocust"], "tujuan" => $kelasTujuan, "by" => $by]);
+        return ["message" => "Percepatan berhasil disimpan"];
+    }
+
+    if ($action === "deletepercepatan") {
+        $id = (int) ($req["id"] ?? 0);
+        if ($id < 1) {
+            fail(422, "ID percepatan tidak valid");
+        }
+        $sql = "
+            DELETE FROM aka_tahfid_percepatan
+            WHERE id = :id AND (:code01_empty = '' OR code01 = :code01_value)
+            LIMIT 1
+        ";
+        $del = $pdo->prepare($sql);
+        $del->bindValue(":id", $id, PDO::PARAM_INT);
+        $del->bindValue(":code01_empty", $userCode01, PDO::PARAM_STR);
+        $del->bindValue(":code01_value", $userCode01, PDO::PARAM_STR);
+        $del->execute();
+        if ($del->rowCount() < 1) {
+            fail(404, "Data percepatan tidak ditemukan");
+        }
+        writeLog("TAHFID_PERCEPATAN_DELETE", ["id" => $id, "by" => $by]);
+        return ["message" => "Percepatan dihapus"];
+    }
+
+    if ($action === "siswaprogress" || $action === "getprogress") {
+        return tahfidStaffSiswaProgress($pdo, $req, $auth);
+    }
+
+    if ($action === "saveprogress") {
+        return tahfidStaffSaveProgress($pdo, $req, $auth);
+    }
+
+    fail(422, "Aksi tahfid tidak valid");
+}
+
+function tahfidSiswaJadwalGroups(PDO $pdo, array $siswa, bool $withLogs = false): array
+{
+    $custid = trim((string) $siswa["custid"]);
+    $code01 = trim((string) $siswa["code01"]);
+    $kelas = trim((string) $siswa["kelas"]);
+    $groups = [];
+
+    $pushGroup = static function (string $sumber, string $kelasSumber, ?array $jadwal) use (&$groups, $pdo, $custid, $withLogs): void {
+        if ($jadwal === null) {
+            return;
+        }
+        $jid = (int) $jadwal["id"];
+        $stmt = $pdo->prepare("
+            SELECT d.id, d.jadwal_id, d.urut, d.surah_nomor, d.surah_nama, d.juz_dari, d.juz_sampai,
+                   d.is_lengkap, d.ayat_dari, d.ayat_sampai,
+                   CASE WHEN s.id IS NULL THEN 0 ELSE 1 END AS sudah_setor,
+                   s.created_at AS setor_at,
+                   TRIM(p.status) AS progress_status,
+                   p.ayat_dari AS progress_ayat_dari,
+                   p.ayat_sampai AS progress_ayat_sampai,
+                   p.catatan AS progress_catatan,
+                   p.updated_at AS progress_at
+            FROM aka_tahfid_jadwal_detail d
+            LEFT JOIN aka_tahfid_setoran s ON s.jadwal_detail_id = d.id AND s.custid = :custid
+            LEFT JOIN aka_tahfid_progress p ON p.jadwal_detail_id = d.id AND p.custid = :custid2
+            WHERE d.jadwal_id = :jid
+            ORDER BY d.urut ASC, d.id ASC
+        ");
+        $stmt->bindValue(":custid", $custid, PDO::PARAM_STR);
+        $stmt->bindValue(":custid2", $custid, PDO::PARAM_STR);
+        $stmt->bindValue(":jid", $jid, PDO::PARAM_INT);
+        $stmt->execute();
+        $details = [];
+        $lunas = 0;
+        $proses = 0;
+        foreach ($stmt->fetchAll() ?: [] as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $row["kelas_sumber"] = $kelasSumber;
+            $row["sumber"] = $sumber;
+            $status = trim((string) ($row["progress_status"] ?? ""));
+            if ($status === "" && ((int) ($row["sudah_setor"] ?? 0)) === 1) {
+                $status = "lunas";
+                $row["progress_status"] = "lunas";
+            }
+            if ($status === "lunas") {
+                $lunas++;
+                $row["progress_label"] = tahfidAyatLabel(true, (int) $row["ayat_dari"], (int) $row["ayat_sampai"]);
+            } elseif ($status === "proses") {
+                $proses++;
+                $pd = (int) ($row["progress_ayat_dari"] ?? 0);
+                $ps = (int) ($row["progress_ayat_sampai"] ?? 0);
+                $row["progress_label"] = ($pd > 0 && $ps > 0) ? ("Ayat " . $pd . "–" . $ps) : "Proses";
+            } else {
+                $row["progress_status"] = "belum";
+                $row["progress_label"] = "";
+            }
+            $mapped = mapTahfidDetailRow($row);
+            if ($withLogs) {
+                $mapped["logs"] = tahfidFetchProgressLogs($pdo, $custid, (int) $mapped["id"]);
+            }
+            $details[] = $mapped;
+        }
+        $groups[] = [
+            "sumber" => $sumber,
+            "kelas" => $kelasSumber,
+            "jadwal_id" => $jid,
+            "jumlah_surat" => count($details),
+            "jumlah_lunas" => $lunas,
+            "jumlah_proses" => $proses,
+            "details" => $details,
+        ];
+    };
+
+    $findJadwal = $pdo->prepare("
+        SELECT j.id, j.code01, j.kelas, TRIM(ms.DESC01) AS sekolah
+        FROM aka_tahfid_jadwal j
+        LEFT JOIN mst_sekolah ms ON ms.CODE01 = j.code01
+        WHERE j.code01 = :c AND j.kelas = :k
+        LIMIT 1
+    ");
+    $findJadwal->bindValue(":c", $code01, PDO::PARAM_STR);
+    $findJadwal->bindValue(":k", $kelas, PDO::PARAM_STR);
+    $findJadwal->execute();
+    $own = $findJadwal->fetch() ?: null;
+    $pushGroup("kelas", $kelas, is_array($own) ? $own : null);
+
+    $acc = $pdo->prepare("SELECT kelas_tujuan FROM aka_tahfid_percepatan WHERE custid = :c ORDER BY id ASC");
+    $acc->bindValue(":c", $custid, PDO::PARAM_STR);
+    $acc->execute();
+    foreach ($acc->fetchAll() ?: [] as $row) {
+        $tujuan = trim((string) ($row["kelas_tujuan"] ?? ""));
+        if ($tujuan === "" || $tujuan === $kelas) {
+            continue;
+        }
+        $findJadwal->bindValue(":c", $code01, PDO::PARAM_STR);
+        $findJadwal->bindValue(":k", $tujuan, PDO::PARAM_STR);
+        $findJadwal->execute();
+        $extra = $findJadwal->fetch() ?: null;
+        $pushGroup("percepatan", $tujuan, is_array($extra) ? $extra : null);
+    }
+
+    return $groups;
+}
+
+function tahfidMyJadwal(PDO $pdo, array $auth): array
+{
+    $custid = trim((string) ($auth["custid"] ?? ""));
+    $siswa = tahfidFetchSiswaLive($pdo, $custid);
+    if (!$siswa) {
+        fail(404, "Data siswa tidak ditemukan");
+    }
+    return [
+        "siswa" => [
+            "custid" => trim((string) $siswa["custid"]),
+            "nocust" => trim((string) $siswa["nocust"]),
+            "nmcust" => trim((string) $siswa["nmcust"]),
+            "kelas" => trim((string) $siswa["kelas"]),
+            "code01" => trim((string) $siswa["code01"]),
+            "sekolah" => trim((string) ($siswa["sekolah"] ?? "")),
+        ],
+        "groups" => tahfidSiswaJadwalGroups($pdo, $siswa, false),
+    ];
+}
+
+function tahfidStaffSiswaProgress(PDO $pdo, array $req, array $auth): array
+{
+    $userCode01 = staffUnitCode01($auth);
+    $nocust = trim((string) ($req["nis"] ?? $req["nocust"] ?? ""));
+    if ($nocust === "" || !secure_validate_nocust($nocust)) {
+        fail(422, "NIS siswi tidak valid");
+    }
+    $siswa = fetchSiswaByNocust($pdo, $nocust, $userCode01);
+    if (!$siswa) {
+        fail(404, "Siswi tidak ditemukan pada unit Anda");
+    }
+    $groups = tahfidSiswaJadwalGroups($pdo, $siswa, true);
+    $lunas = 0;
+    $total = 0;
+    foreach ($groups as $g) {
+        $total += (int) ($g["jumlah_surat"] ?? 0);
+        $lunas += (int) ($g["jumlah_lunas"] ?? 0);
+    }
+    return [
+        "siswa" => [
+            "custid" => trim((string) $siswa["custid"]),
+            "nocust" => trim((string) $siswa["nocust"]),
+            "nmcust" => trim((string) $siswa["nmcust"]),
+            "kelas" => trim((string) $siswa["kelas"]),
+            "code01" => trim((string) $siswa["code01"]),
+            "sekolah" => trim((string) ($siswa["sekolah"] ?? "")),
+        ],
+        "groups" => $groups,
+        "ringkasan" => [
+            "jumlah_surat" => $total,
+            "jumlah_lunas" => $lunas,
+        ],
+    ];
+}
+
+function tahfidStaffSaveProgress(PDO $pdo, array $req, array $auth): array
+{
+    $userCode01 = staffUnitCode01($auth);
+    $by = approvalStaffUsername($auth);
+    $nocust = trim((string) ($req["nis"] ?? $req["nocust"] ?? ""));
+    $detailId = (int) ($req["jadwal_detail_id"] ?? 0);
+    if ($nocust === "" || !secure_validate_nocust($nocust)) {
+        fail(422, "NIS siswi tidak valid");
+    }
+    if ($detailId < 1) {
+        fail(422, "Item jadwal tidak valid");
+    }
+    $siswa = fetchSiswaByNocust($pdo, $nocust, $userCode01);
+    if (!$siswa) {
+        fail(404, "Siswi tidak ditemukan pada unit Anda");
+    }
+    $forceLunas = in_array(strtolower(trim((string) ($req["status"] ?? $req["mode"] ?? ""))), ["lunas", "selesai", "lengkap"], true)
+        || ((int) ($req["is_lengkap"] ?? 0)) === 1;
+    $ayatDari = (int) ($req["ayat_dari"] ?? 0);
+    $ayatSampai = (int) ($req["ayat_sampai"] ?? 0);
+    $catatan = (string) ($req["catatan"] ?? "");
+    $result = tahfidUpsertProgress($pdo, $siswa, $detailId, $ayatDari, $ayatSampai, $forceLunas, $catatan, $by);
+    writeLog("TAHFID_PROGRESS_SAVE", [
+        "nocust" => $nocust,
+        "detail" => $detailId,
+        "status" => $result["status"],
+        "by" => $by,
+    ]);
+    return $result;
+}
+
+function tahfidSubmitSetoran(PDO $pdo, array $req, array $auth): array
+{
+    $custid = trim((string) ($auth["custid"] ?? ""));
+    $detailId = (int) ($req["jadwal_detail_id"] ?? 0);
+    if ($detailId < 1) {
+        fail(422, "Item jadwal tidak valid");
+    }
+    $siswa = tahfidFetchSiswaLive($pdo, $custid);
+    if (!$siswa) {
+        fail(404, "Data siswa tidak ditemukan");
+    }
+    $code01 = trim((string) $siswa["code01"]);
+    $kelas = trim((string) $siswa["kelas"]);
+
+    $stmt = $pdo->prepare("
+        SELECT d.id, j.code01, j.kelas
+        FROM aka_tahfid_jadwal_detail d
+        INNER JOIN aka_tahfid_jadwal j ON j.id = d.jadwal_id
+        WHERE d.id = :id
+        LIMIT 1
+    ");
+    $stmt->bindValue(":id", $detailId, PDO::PARAM_INT);
+    $stmt->execute();
+    $row = $stmt->fetch();
+    if (!$row) {
+        fail(404, "Item jadwal tidak ditemukan");
+    }
+    if (trim((string) $row["code01"]) !== $code01) {
+        fail(403, "Jadwal ini bukan untuk unit Anda");
+    }
+    $jadwalKelas = trim((string) $row["kelas"]);
+    $allowed = $jadwalKelas === $kelas;
+    if (!$allowed) {
+        $cek = $pdo->prepare("SELECT id FROM aka_tahfid_percepatan WHERE custid = :c AND kelas_tujuan = :k LIMIT 1");
+        $cek->bindValue(":c", $custid, PDO::PARAM_STR);
+        $cek->bindValue(":k", $jadwalKelas, PDO::PARAM_STR);
+        $cek->execute();
+        $allowed = (int) ($cek->fetchColumn() ?: 0) > 0;
+    }
+    if (!$allowed) {
+        fail(403, "Anda belum ditugaskan ke jadwal kelas ini");
+    }
+
+    try {
+        $ins = $pdo->prepare("
+            INSERT INTO aka_tahfid_setoran
+                (custid, nocust, nmcust, code01, kelas, jadwal_detail_id, status, created_at)
+            VALUES
+                (:custid, :nocust, :nmcust, :code01, :kelas, :did, 'setor', NOW())
+        ");
+        $ins->bindValue(":custid", $custid, PDO::PARAM_STR);
+        $ins->bindValue(":nocust", (string) $siswa["nocust"], PDO::PARAM_STR);
+        $ins->bindValue(":nmcust", (string) $siswa["nmcust"], PDO::PARAM_STR);
+        $ins->bindValue(":code01", $code01, PDO::PARAM_STR);
+        $ins->bindValue(":kelas", $kelas, PDO::PARAM_STR);
+        $ins->bindValue(":did", $detailId, PDO::PARAM_INT);
+        $ins->execute();
+    } catch (Throwable $e) {
+        if (stripos($e->getMessage(), "Duplicate") !== false) {
+            return ["message" => "Setoran ini sudah tercatat"];
+        }
+        throw $e;
+    }
+    writeLog("TAHFID_SETORAN", ["custid" => $custid, "detail" => $detailId]);
+    try {
+        tahfidUpsertProgress($pdo, $siswa, $detailId, 0, 0, true, "Setoran siswi", "siswa");
+    } catch (Throwable $e) {
+        writeLog("TAHFID_SETORAN_PROGRESS_FAIL", ["custid" => $custid, "message" => $e->getMessage()]);
+    }
+    return ["message" => "Setoran hafalan tercatat"];
 }
 
 loadEnv(__DIR__ . "/.env");
@@ -2412,6 +4356,30 @@ try {
             "entity" => (string) ($req["entity"] ?? ""),
         ]);
         $data = doManageKatalog($req, $decoded);
+        http_response_code(200);
+        echo json_encode(["status" => 200, "data" => $data], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    if ($method === "searchSiswa") {
+        writeLog("METHOD_SEARCH_SISWA", ["q" => (string) ($req["q"] ?? "")]);
+        $data = doSearchSiswa($req, $decoded);
+        http_response_code(200);
+        echo json_encode(["status" => 200, "data" => $data], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    if ($method === "manageCatatanKepribadian") {
+        writeLog("METHOD_CATATAN_KEPRIBADIAN", ["action" => (string) ($req["action"] ?? "list")]);
+        $data = doManageCatatanKepribadian($req, $decoded);
+        http_response_code(200);
+        echo json_encode(["status" => 200, "data" => $data], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    if ($method === "manageTahfid") {
+        writeLog("METHOD_TAHFID", ["action" => (string) ($req["action"] ?? "list")]);
+        $data = doManageTahfid($req, $decoded);
         http_response_code(200);
         echo json_encode(["status" => 200, "data" => $data], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         exit;
