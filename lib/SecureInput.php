@@ -212,6 +212,30 @@ function secure_validate_semester(string $value): ?string
     return ($value === '1' || $value === '2') ? $value : null;
 }
 
+function secure_validate_tanggal(string $value): ?string
+{
+    $value = trim($value);
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $value)) {
+        return null;
+    }
+    $dt = DateTime::createFromFormat('Y-m-d', $value);
+    $errors = DateTime::getLastErrors();
+    if (
+        !$dt
+        || $dt->format('Y-m-d') !== $value
+        || (is_array($errors) && (($errors['warning_count'] ?? 0) > 0 || ($errors['error_count'] ?? 0) > 0))
+    ) {
+        return null;
+    }
+    $year = (int) $dt->format('Y');
+    $maxYear = (int) date('Y') + 1;
+    if ($year < 2000 || $year > $maxYear) {
+        return null;
+    }
+
+    return $value;
+}
+
 function secure_validate_nisn(string $value): ?string
 {
     $value = trim($value);

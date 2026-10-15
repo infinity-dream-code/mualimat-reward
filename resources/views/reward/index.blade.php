@@ -182,9 +182,16 @@
                         <label for="penyelenggara">Penyelenggara <span>*</span></label>
                         <input type="text" id="penyelenggara" required maxlength="150" placeholder="Nama lembaga atau panitia">
                     </div>
-                    <div class="field">
-                        <label for="no_sertifikat">No. sertifikat <span>*</span></label>
-                        <input type="text" id="no_sertifikat" required maxlength="80" placeholder="Nomor pada sertifikat">
+                    <div class="field-row">
+                        <div class="field">
+                            <label for="no_sertifikat">No. sertifikat <span>*</span></label>
+                            <input type="text" id="no_sertifikat" required maxlength="80" placeholder="Nomor pada sertifikat">
+                        </div>
+                        <div class="field">
+                            <label for="tanggal_pelaksanaan">Tanggal pelaksanaan <span>*</span></label>
+                            <input type="date" id="tanggal_pelaksanaan" name="tanggal_pelaksanaan" required min="2000-01-01" max="{{ (int) date('Y') + 1 }}-12-31">
+                            <p class="hint">Tanggal lomba atau kegiatan dilaksanakan.</p>
+                        </div>
                     </div>
                     <div class="field">
                         <label for="url">Link foto dan video <span>*</span></label>

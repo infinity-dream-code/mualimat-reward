@@ -18,17 +18,12 @@ class RewardApiController extends Controller
     public function handle(Request $request): JsonResponse
     {
         $wsUrl = $this->ws->url();
-        $wsEntry = base_path('ws/index.php');
-        $methodHint = trim((string) $request->input('method', ''));
-        $needsLocalMethod = $methodHint === 'getPrestasiSaya'
-            || ($methodHint === 'submitPrestasi' && trim((string) $request->input('id', '')) !== '');
-
-        if ($wsUrl === '' || $needsLocalMethod) {
+        if ($wsUrl === '') {
+            $wsEntry = base_path('ws/index.php');
             if (!is_file($wsEntry)) {
                 return $this->jsonError(500, 'Konfigurasi server belum lengkap');
             }
 
-            // Include ws/index.php before lib/SecureInput.php — both define the same helpers.
             $this->dispatchLocalWs($request, $wsEntry);
         }
 
@@ -123,6 +118,7 @@ class RewardApiController extends Controller
             'keterangan' => $fields['keterangan'],
             'penyelenggara' => $fields['penyelenggara'],
             'no_sertifikat' => $fields['no_sertifikat'],
+            'tanggal_pelaksanaan' => $fields['tanggal_pelaksanaan'],
             'url' => $fields['url'],
         ];
         if ($fields['id'] !== null) {
@@ -133,7 +129,7 @@ class RewardApiController extends Controller
     }
 
     /**
-     * @return array{id: int|null, nisn: string, tahun_akademik: string, semester: string, prestasi_kategori_id: int, prestasi_tingkat_id: int, prestasi_poin_id: int, keterangan: string, penyelenggara: string, no_sertifikat: string, url: string}
+     * @return array{id: int|null, nisn: string, tahun_akademik: string, semester: string, prestasi_kategori_id: int, prestasi_tingkat_id: int, prestasi_poin_id: int, keterangan: string, penyelenggara: string, no_sertifikat: string, tanggal_pelaksanaan: string, url: string}
      */
     private function validatePrestasiFields(Request $request): array
     {
@@ -180,6 +176,15 @@ class RewardApiController extends Controller
             throw new InvalidArgumentException('No sertifikat tidak valid (maksimal 80 karakter).');
         }
 
+        $tanggal = secure_validate_tanggal((string) (
+            $request->input('tanggal_pelaksanaan', '')
+            ?: $request->input('tanggal_lomba', '')
+            ?: $request->input('tgl_pelaksanaan', '')
+        ));
+        if ($tanggal === null) {
+            throw new InvalidArgumentException('Tanggal pelaksanaan wajib diisi (format YYYY-MM-DD).');
+        }
+
         $url = secure_validate_gdrive_url((string) $request->input('url', ''));
         if ($url === null) {
             throw new InvalidArgumentException('Link harus tautan Google Drive.');
@@ -196,6 +201,7 @@ class RewardApiController extends Controller
             'keterangan' => $keterangan,
             'penyelenggara' => $penyelenggara,
             'no_sertifikat' => $sertifikat,
+            'tanggal_pelaksanaan' => $tanggal,
             'url' => $url,
         ];
     }

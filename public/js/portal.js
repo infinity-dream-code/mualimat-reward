@@ -258,6 +258,15 @@
         return `${d}/${m}/${y}`;
     }
 
+    function isValidTanggalPelaksanaan(value) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+        const [y, m, d] = value.split('-').map(Number);
+        const dt = new Date(y, m - 1, d);
+        if (dt.getFullYear() !== y || dt.getMonth() !== m - 1 || dt.getDate() !== d) return false;
+        const maxYear = new Date().getFullYear() + 1;
+        return y >= 2000 && y <= maxYear;
+    }
+
     function setPanel(name) {
         const formView = $('view-form');
         formView.classList.toggle('is-list', name === 'list');
@@ -316,6 +325,7 @@
         }
         box.innerHTML = filtered.map((item) => {
             const st = item.isapproved || 'pending';
+            const tglLaksana = formatTanggal(item.tanggal_pelaksanaan);
             const tgl = formatTanggal(item.updated_at || item.created_at);
             const note = st === 'canceled' && item.catatan_admin
                 ? `<p class="pengajuan-note">Catatan: ${escapeHtml(item.catatan_admin)}</p>`
@@ -331,6 +341,7 @@
                 <div class="pengajuan-meta">
                     <span class="st st-${escapeHtml(st)}">${STATUS_LABEL[st] || st}</span>
                     <span>Poin ${escapeHtml(formatSkor(item.nilai_penghargaan))}</span>
+                    ${tglLaksana ? `<span>Pelaksanaan ${tglLaksana}</span>` : ''}
                     ${tgl ? `<span>${tgl}</span>` : ''}
                 </div>
                 ${note}
@@ -380,6 +391,7 @@
         $('countKet').textContent = $('keterangan').value.length + '/500';
         $('penyelenggara').value = item.penyelenggara || '';
         $('no_sertifikat').value = item.no_sertifikat || '';
+        $('tanggal_pelaksanaan').value = String(item.tanggal_pelaksanaan || '').slice(0, 10);
         $('url').value = item.url || '';
         setPanel('form');
         $('prestasiForm').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -451,11 +463,16 @@
         const ket = $('keterangan').value.trim();
         const penyelenggara = $('penyelenggara').value.trim();
         const sertifikat = $('no_sertifikat').value.trim();
+        const tanggal = $('tanggal_pelaksanaan').value.trim();
         const url = $('url').value.trim();
         const driveOk = /^https:\/\/(drive|docs)\.google\.com\//i.test(url)
             || /^https:\/\/drive\.usercontent\.google\.com\//i.test(url);
         if (nisn !== '' && !/^\d{10}$/.test(nisn)) {
             notify.warning('NISN harus 10 digit angka, atau biarkan kosong.');
+            return;
+        }
+        if (!isValidTanggalPelaksanaan(tanggal)) {
+            notify.warning('Tanggal pelaksanaan wajib diisi.');
             return;
         }
         if (!/^\d{4}\/\d{4}$/.test(tahun) || !/^[12]$/.test(semester)
@@ -481,6 +498,7 @@
                 keterangan: ket,
                 penyelenggara,
                 no_sertifikat: sertifikat,
+                tanggal_pelaksanaan: tanggal,
                 url,
             };
             if (editId) payload.id = editId;

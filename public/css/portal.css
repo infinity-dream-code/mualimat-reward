@@ -417,6 +417,12 @@ html.dark .panel-nav button.active { color: var(--header-text); border-bottom-co
     background: var(--bg-page);
     color: var(--text-secondary);
 }
+.field input[type="date"] {
+    min-width: 0;
+}
+html.dark .field input[type="date"] {
+    color-scheme: dark;
+}
 .field-row-3 { display: grid; gap: 0.85rem; }
 .field input:focus,
 .field select:focus,

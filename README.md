@@ -1,66 +1,529 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# API WS Mualimat Reward
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+Dokumentasi folder `ws/` berdasarkan kode yang ditarik dari server.
 
-## About Laravel
+- **Endpoint produksi:** `http://103.23.103.43/ws_client/mualimat_reward/index.php`
+- **Entry point:** `ws/index.php`
+- **Database:** MySQL `yogya_muallimaat` (lihat `ws/.env`, jangan commit secret)
+- **Terakhir diselaraskan:** 14 Oktober 2026
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+Setiap kali folder `ws/` di-update dari server, **file ini wajib diperbarui** (method, tabel, kolom, validasi, env).
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+---
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+## Ringkasan
 
-## Learning Laravel
+API PHP JSON (POST). Semua aksi memakai field `method`. Laravel di project ini biasanya memanggil URL di `WS_URL`. Method portal siswa yang belum ada di server produksi (`getPrestasiSaya`, kirim ulang `submitPrestasi` + `id`) dijalankan dari folder `ws/` lokal.
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework.
+| Method | Auth | Fungsi |
+|---|---|---|
+| `login` | tidak | Login siswa (`sm_user` + `scctcust`) |
+| `loginApproval` | tidak | Login Musrifah / superadmin |
+| `getTahunAkademik` | tidak | Daftar tahun akademik |
+| `getPrestasiKatalog` | tidak | Master jenis → tingkat → poin |
+| `getPrestasiSaya` | JWT siswa | Daftar pengajuan siswa, skor disetujui, status |
+| `submitPrestasi` | JWT siswa | Simpan prestasi + tautan Google Drive; `id` = kirim ulang yang ditolak |
+| `approval` | JWT staf | List / approve / tolak |
+| `manageUsers` | JWT superadmin | CRUD Musrifah & superadmin |
+| `manageKatalog` | JWT superadmin | CRUD kategori, tingkat, dan poin |
+| `searchSiswa` | JWT staf | Cari siswi (`scctcust`) untuk catatan kepribadian |
+| `manageCatatanKepribadian` | JWT staf | CRUD catatan kepribadian siswi |
+| `manageTahfid` | JWT siswa/staf | Jadwal, setoran, progres, dan laporan rekap setoran tahfid |
 
-You may also try the [Laravel Bootcamp](https://bootcamp.laravel.com), where you will be guided through building a modern Laravel application from scratch.
+---
 
-If you don't feel like reading, [Laracasts](https://laracasts.com) can help. Laracasts contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+## Struktur folder
 
-## Laravel Sponsors
+```
+ws/
+├── index.php              # API utama
+├── index2.php             # varian/uji (bukan kontrak utama)
+├── payload.php            # util JWT
+├── Validator.php          # validator generik
+├── info.php
+├── .env                   # konfigurasi runtime (secret, jangan commit)
+├── error.log
+├── config/
+│   ├── conn.php           # PDO MySQL
+│   ├── DbClass.php
+│   └── jwt.php            # JWT HS256 (class JWT)
+├── src/jwt/               # library Firebase JWT (cadangan)
+├── sql/                   # query Navicat (katalog prestasi)
+└── public/uploads/        # file bukti (legacy)
+```
 
-We would like to extend our thanks to the following sponsors for funding Laravel development. If you are interested in becoming a sponsor, please visit the [Laravel Partners program](https://partners.laravel.com).
+Loader `index.php` memakai `lib/` jika ada, jika tidak memakai `config/` (`DbClass.php`, `conn.php`, `jwt.php`).
 
-### Premium Partners
+---
 
-- **[Vehikl](https://vehikl.com/)**
-- **[Tighten Co.](https://tighten.co)**
-- **[WebReinvent](https://webreinvent.com/)**
-- **[Kirschbaum Development Group](https://kirschbaumdevelopment.com)**
-- **[64 Robots](https://64robots.com)**
-- **[Curotec](https://www.curotec.com/services/technologies/laravel/)**
-- **[Cyber-Duck](https://cyber-duck.co.uk)**
-- **[DevSquad](https://devsquad.com/hire-laravel-developers)**
-- **[Jump24](https://jump24.co.uk)**
-- **[Redberry](https://redberry.international/laravel/)**
-- **[Active Logic](https://activelogic.com)**
-- **[byte5](https://byte5.de)**
-- **[OP.GG](https://op.gg)**
+## Environment (`ws/.env`)
 
-## Contributing
+| Variabel | Wajib | Keterangan |
+|---|---|---|
+| `DB_HOST` | ya | Host MySQL |
+| `DB_PORT` | tidak | Default `3306` |
+| `DB_DATABASE` | ya | Nama database |
+| `DB_USERNAME` | ya | User DB |
+| `DB_PASSWORD` | tidak | Password DB |
+| `JWT_KEY` | ya | Kunci HMAC HS256 |
+| `CORS_ORIGIN` | tidak | Default `*` |
+| `PUBLIC_BASE_URL` | tidak | Prefix URL file publik |
+| `LARAVEL_APP_URL` | tidak | Host yang diizinkan untuk field `url` |
+| `UPLOAD_ABS_PATH` | tidak | Default `ws/public/uploads` |
+| `UPLOAD_URL_PREFIX` | tidak | Default `/uploads` |
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+Jangan menuliskan nilai secret di README.
 
-## Code of Conduct
+---
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+## Relasi tabel
 
-## Security Vulnerabilities
+```mermaid
+erDiagram
+    sm_user ||--o| scctcust : "urut = CUSTID"
+    prestasi_dan_pelanggaran_user ||--o| mst_sekolah : "code01 = CODE01"
+    scctcust ||--o| mst_sekolah : "CODE01"
+    aka_reward ||--o| scctcust : "custid = CUSTID"
+    aka_reward }o--|| mst_thn_aka : "bta = thn_aka"
+    aka_prestasi_kategori ||--o{ aka_prestasi_tingkat : "kategori_id"
+    aka_prestasi_tingkat ||--o{ aka_prestasi_poin : "tingkat_id"
+    aka_reward }o--|| aka_prestasi_poin : "prestasi_poin_id"
+    aka_prestasi_kategori }o--o| mst_sekolah : "code01 (kosong = semua)"
+    aka_catatan_kepribadian }o--|| scctcust : "custid = CUSTID"
+    aka_catatan_kepribadian }o--|| mst_thn_aka : "bta = thn_aka"
+```
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+---
 
-## License
+## Tabel dan kolom (yang dipakai API)
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+Tipe di bawah adalah **inferensi dari pemakaian SQL**, bukan dump `SHOW CREATE TABLE`. Kolom lain mungkin ada di database tapi tidak disentuh API ini.
+
+### 1. `sm_user`
+
+Akun login siswa (`method=login`).
+
+| Kolom | Dipakai sebagai | Keterangan |
+|---|---|---|
+| `userlogin` | username | `TRIM(userlogin)` dicocokkan ke input |
+| `kunci` | password | `password_hash` / SHA1 / SHA256 / MD5 / plaintext |
+| `urut` | join ke profil | `scctcust.CUSTID = sm_user.urut` |
+
+**Join:** `LEFT JOIN scctcust c ON c.CUSTID = u.urut`
+
+Jika baris `sm_user` ada tapi `scctcust` tidak ketemu: **403** “Data akun tidak lengkap”.
+
+---
+
+### 2. `prestasi_dan_pelanggaran_user`
+
+Akun login staf (`method=loginApproval`) dan kelola admin (`manageUsers`). Bukan sumber login siswa.
+
+| Kolom | Dipakai sebagai | Keterangan |
+|---|---|---|
+| `idincrement` | PK, `userid` | ID numerik akun |
+| `username` | login staf | Unik, 1–50, pola `[a-zA-Z0-9._@-]+` |
+| `password` | login staf | `password_hash` / SHA1 / SHA256 / MD5 / plaintext |
+| `nama` | label akun | Maks. 50 saat create/update admin |
+| `role` | otorisasi | `Musrifah`, `superadmin` (akun `siswa` di tabel ini tidak dipakai `login`) |
+| `code01` | sekolah user | FK ke `mst_sekolah.CODE01`, wajib untuk Musrifah (maks. 20) |
+
+**Join:** `LEFT JOIN mst_sekolah ms ON ms.CODE01 = u.code01`
+
+**Role:**
+
+| Nilai di DB | Login siswa (`login`) | Login staf (`loginApproval`) | Approval | Kelola admin |
+|---|---|---|---|---|
+| `sm_user` + `scctcust` | ya | tidak | tidak | tidak |
+| selain Musrifah/superadmin di tabel staf | tidak | 403 | tidak | tidak |
+| `Musrifah` | tidak | ya | ya, hanya sekolah `code01` | tidak |
+| `superadmin` | tidak | ya | ya, semua sekolah | ya |
+
+---
+
+### 3. `mst_sekolah`
+
+Master sekolah / unit (filter approval staf).
+
+| Kolom | Dipakai sebagai | Keterangan |
+|---|---|---|
+| `CODE01` | PK kode sekolah | Dipakai user staf, customer, filter approval |
+| `DESC01` | nama sekolah | Tampil sebagai `nama_sekolah` / `sekolah` di login staf |
+
+---
+
+### 4. `mst_thn_aka`
+
+Master tahun akademik.
+
+| Kolom | Dipakai sebagai | Keterangan |
+|---|---|---|
+| `thn_aka` | tahun, format `YYYY/YYYY` | Tahun akhir = tahun awal + 1 |
+| `urut` | urutan list | `ORDER BY urut ASC` |
+
+Submit prestasi menolak `bta` yang tidak ada di tabel ini.
+
+---
+
+### 5. `aka_reward`
+
+Data prestasi yang diinput.
+
+| Kolom | Dipakai sebagai | Keterangan |
+|---|---|---|
+| `id` | PK | Diisi manual `MAX(id)+1` jika autoincrement tidak jalan |
+| `custid` | ID siswa | Dari JWT `custid` (`scctcust.CUSTID` = `sm_user.urut`) |
+| `nocust` | nomor siswa | Dari JWT (`scctcust.NOCUST`, fallback `userlogin`). Folder upload = `uploads/{nocust}/` |
+| `nisn` | NISN siswa | Opsional; kosong atau 10 digit |
+| `nmcust` | nama | Dari JWT (`scctcust.NMCUST`) |
+| `kelas` | kelas | Dari JWT `kelas` (`scctcust.DESC02`) |
+| `jenis_prestasi` | label gabungan | `kategori — tingkat — capaian` (disusun server) |
+| `prestasi_kategori_id` | FK kategori | `aka_prestasi_kategori.id` |
+| `prestasi_tingkat_id` | FK tingkat | `aka_prestasi_tingkat.id` |
+| `prestasi_poin_id` | FK poin | `aka_prestasi_poin.id` |
+| `keterangan` | deskripsi | Teks, maks. 500, tanpa HTML |
+| `penyelenggara` | lembaga | Teks, maks. 150 |
+| `no_sertifikat` | nomor sertifikat | Teks, maks. 80 |
+| `tanggal_pelaksanaan` | tanggal lomba | `DATE` `YYYY-MM-DD`. Auto-ALTER jika belum ada. Migrasi: `ws/sql/aka_reward_tanggal_pelaksanaan.sql` |
+| `nilai_penghargaan` | nilai | Disalin dari `aka_prestasi_poin.nilai` saat submit (bukan dari klien) |
+| `bta` | tahun akademik | Sama dengan `tahun_akademik` / `mst_thn_aka.thn_aka` |
+| `semester` | semester | `1` atau `2` |
+| `url` | bukti | Tautan Google Drive (`drive.google.com` / `docs.google.com`) |
+| `isapproved` | status | ENUM `pending` / `approve` / `canceled` (bukan 0/1/NULL). Default insert = `pending`. Migrasi: `ws/sql/aka_reward_approval_status.sql` |
+| `approveddate` | waktu aksi | `NOW()` saat setujui atau tolak |
+| `approvedby` | username petugas | Dari JWT staf `username` |
+| `catatan_admin` | alasan tolak | Wajib saat `tolak`, dikosongkan saat `approve`. Migrasi: `ws/sql/aka_reward_catatan_admin.sql` |
+| `created_at` | waktu input | `NOW()` |
+| `updated_at` | waktu ubah | `NOW()` |
+
+**Join approval:**
+
+```sql
+aka_reward ar
+LEFT JOIN scctcust sc ON sc.CUSTID = ar.custid
+LEFT JOIN mst_sekolah ms ON ms.CODE01 = sc.CODE01
+```
+
+Musrifah hanya melihat baris yang `sc.CODE01` = `code01` di token. Superadmin tanpa filter sekolah.
+
+Limit list: **1000** baris terbaru.
+
+---
+
+### 6. `aka_prestasi_kategori`
+
+Master jenis prestasi (A–F).
+
+| Kolom | Dipakai sebagai | Keterangan |
+|---|---|---|
+| `id` | PK | Dipilih di form, lalu disimpan ke `aka_reward` |
+| `kode` | A–F | Kode kategori; unik bersama `code01` |
+| `nama` | label combo | Contoh: Prestasi Lomba Non Akademik |
+| `urut` | urutan combo | |
+| `code01` | unit | `mst_sekolah.CODE01`. Kosong = semua unit. Terisi = kategori beserta tingkat dan poinnya hanya untuk unit itu. Poin beda per unit: buat baris kategori terpisah (kode boleh sama). |
+
+### 7. `aka_prestasi_tingkat`
+
+Tingkat / rincian per kategori (Organtri, Madrasah, … atau item keagamaan).
+
+| Kolom | Dipakai sebagai | Keterangan |
+|---|---|---|
+| `id` | PK | |
+| `kategori_id` | FK | `aka_prestasi_kategori.id` |
+| `nama` | label combo ke-2 | |
+| `urut` | urutan | |
+
+### 8. `aka_prestasi_poin`
+
+Capaian (Juara 1/2/3, Harapan, Peserta, Peringkat, dll.) plus nilai. **Nilai awal 0**; admin yang mengisi.
+
+| Kolom | Dipakai sebagai | Keterangan |
+|---|---|---|
+| `id` | PK | |
+| `tingkat_id` | FK | `aka_prestasi_tingkat.id` |
+| `nama` | label combo ke-3 | |
+| `nilai` | poin | `DECIMAL`, default `0.00` |
+| `urut` | urutan | |
+
+Query seed: `ws/sql/rombak_prestasi_katalog.sql`.
+Kolom `aka_reward`: `ws/sql/alter_aka_reward_kolom_prestasi.sql` (jalankan per baris; abaikan Duplicate column).
+Status `aka_reward.isapproved`: `ws/sql/aka_reward_approval_status.sql`.
+Kolom `aka_reward.catatan_admin`: `ws/sql/aka_reward_catatan_admin.sql` (abaikan Duplicate column).
+Kolom `aka_prestasi_kategori.code01`: `ws/sql/aka_prestasi_unit.sql` (abaikan Duplicate column jika sudah ada).
+
+---
+
+### 9. `scctcust`
+
+Profil siswa di sistem akademik. Dipakai login siswa dan filter sekolah pada approval.
+
+| Kolom | Dipakai sebagai | Keterangan |
+|---|---|---|
+| `CUSTID` | `custid`, join `sm_user.urut` dan `aka_reward.custid` | Harus ada agar login siswa sukses |
+| `NOCUST` | `nocust` | Nomor siswa; fallback `sm_user.userlogin` |
+| `NMCUST` | `nmcust` | Nama |
+| `CODE01` | kode sekolah | FK ke `mst_sekolah.CODE01` (filter Musrifah) |
+| `CODE02` | `unit` | Identitas / unit, contoh MA, MTs |
+| `DESC02` | `kelas` | Kelas, contoh IX A, ICT |
+| `DESC03` | `kelompok` | Kelompok / asrama, contoh TESTING |
+
+Jika `custid` di `aka_reward` tidak ketemu di `scctcust`, baris itu tidak lolos filter Musrifah (`CODE01` NULL).
+
+---
+
+### 10. `aka_catatan_kepribadian`
+
+Catatan kepribadian siswi. Diisi Musrifah / superadmin. Identitas siswi diambil dari `scctcust` (NIS, nama, kelas). Jenis pelanggaran, bentuk pembinaan, dan skor diisi manual.
+
+| Kolom | Dipakai sebagai | Keterangan |
+|---|---|---|
+| `id` | PK | AUTO_INCREMENT |
+| `custid` | FK siswi | `scctcust.CUSTID` |
+| `nocust` | NIS | `scctcust.NOCUST` |
+| `nmcust` | nama | Salinan saat simpan |
+| `kelas` | kelas | `scctcust.DESC02` |
+| `code01` | unit | Filter Musrifah |
+| `bta` | tahun ajaran | `mst_thn_aka.thn_aka` |
+| `semester` | semester | `1` ganjil, `2` genap |
+| `jenis_pelanggaran` | teks | Input manual, maks. 500 |
+| `bentuk_pembinaan` | teks | Input manual, maks. 500 |
+| `skor` | nilai | `DECIMAL`, input manual |
+| `created_by` / `updated_by` | username petugas | |
+
+Query: `ws/sql/aka_catatan_kepribadian.sql`. WS juga membuat tabel jika belum ada.
+
+---
+
+## Bukti prestasi
+
+Submit siswa memakai tautan **Google Drive** (bukan unggah file):
+
+- skema `https`
+- host: `drive.google.com`, `docs.google.com`, atau `drive.usercontent.google.com`
+- maks. 500 karakter
+
+Kode unggah file lama (`saveUploadedFile`) masih ada di `index.php` tapi tidak dipakai `submitPrestasi` saat ini.
+
+---
+
+## Autentikasi JWT
+
+- Algoritma: **HS256**
+- Masa berlaku: **12 jam**
+- Kirim token: field `token` atau header `Authorization: Bearer {jwt}`
+
+### Payload `login` (siswa)
+
+```json
+{
+  "custid": "...",
+  "nocust": "...",
+  "nmcust": "...",
+  "unit": "...",
+  "kelas": "...",
+  "kelompok": "...",
+  "code01": "...",
+  "iat": 0,
+  "exp": 0
+}
+```
+
+### Payload `loginApproval` (staf)
+
+```json
+{
+  "userid": "...",
+  "username": "...",
+  "nama": "...",
+  "role": "...",
+  "code01": "...",
+  "iat": 0,
+  "exp": 0
+}
+```
+
+`submitPrestasi` membutuhkan payload siswa (`custid` + `nocust`). Token staf tidak bisa dipakai submit.
+
+---
+
+## Kontrak method
+
+Format umum sukses:
+
+```json
+{ "status": 200, "data": { } }
+```
+
+Format error:
+
+```json
+{ "status": 401, "message": "..." }
+```
+
+Body: `application/json` atau `application/x-www-form-urlencoded` / multipart (`$_POST`).
+
+### `login`
+
+| Field | Wajib | Aturan |
+|---|---|---|
+| `method` | ya | `login` |
+| `username` | ya | 1–50, `[a-zA-Z0-9._@-]+` |
+| `password` | ya | 1–128, tanpa control char |
+
+`data`: `token`, `custid`, `nocust`, `nmcust`, `unit`, `kelas`, `kelompok`
+
+`custid` = `scctcust.CUSTID` (`sm_user.urut`). `unit` = `CODE02`. `kelas` = `DESC02`. `kelompok` = `DESC03`.
+
+### `loginApproval`
+
+Field sama seperti login, `method=loginApproval`.
+
+`data`: `token`, `userid`, `username`, `nama`, `role`, `code01`
+
+### `getTahunAkademik`
+
+Hanya `method`. `data.tahun_akademik`: array string `YYYY/YYYY`.
+
+### `getPrestasiKatalog`
+
+`method` wajib. Kirim `token` siswa (opsional tapi disarankan) agar daftar disaring ke `scctcust.CODE01` unit siswa. Tanpa token, seluruh katalog dikembalikan (nilai default).
+
+`data`: `kategori`, `tingkat`, `poin`. `kategori` punya `code01` (kosong = semua unit). Tingkat dan poin mengikuti kategori induk: jika `code01` terisi, seluruh pohon itu hanya untuk unit tersebut. Dengan token siswa, daftar disaring ke kategori kosong atau `code01` = unit siswa.
+
+### `getPrestasiSaya`
+
+Butuh JWT siswa. Tanpa field tambahan. Mengembalikan pengajuan milik `custid` + `nocust` di token (maks. 200, terbaru dulu).
+
+`data.items[]`: `id`, `nisn`, `jenis_prestasi`, `prestasi_kategori_id`, `prestasi_tingkat_id`, `prestasi_poin_id`, `keterangan`, `penyelenggara`, `no_sertifikat`, `tanggal_pelaksanaan`, `nilai_penghargaan`, `tahun_akademik`, `semester`, `url`, `isapproved`, `catatan_admin` (hanya jika `canceled`), `can_edit` (true jika `canceled`), `created_at`, `updated_at`.
+
+`data.total_skor`: SUM `nilai_penghargaan` yang `isapproved=approve`. `data.jumlah`: hitungan `pending` / `approve` / `canceled`.
+
+### `submitPrestasi`
+
+| Field | Wajib | Aturan |
+|---|---|---|
+| `token` | ya | JWT siswa |
+| `id` | tidak | PK `aka_reward`; jika diisi, harus milik siswa dan status `canceled` (kirim ulang) |
+| `nisn` | tidak | kosong atau 10 digit angka |
+| `tahun_akademik` atau `bta` | ya | ada di `mst_thn_aka` |
+| `semester` | ya | `1` atau `2` |
+| `prestasi_kategori_id` | ya | ada di master, selaras tingkat & poin |
+| `prestasi_tingkat_id` | ya | milik kategori terpilih |
+| `prestasi_poin_id` | ya | milik tingkat terpilih |
+| `keterangan` | ya | maks. 500 |
+| `penyelenggara` | ya | maks. 150 |
+| `no_sertifikat` | ya | maks. 80 |
+| `tanggal_pelaksanaan` | ya | `YYYY-MM-DD` (alias: `tanggal_lomba`, `tgl_pelaksanaan`) |
+| `url` | ya | tautan Google Drive |
+
+`nilai_penghargaan` dan `jenis_prestasi` disusun server dari master poin. Tanpa `id`: INSERT status `pending`. Dengan `id`: UPDATE baris ditolak, status kembali `pending`, `catatan_admin` / `approvedby` / `approveddate` dikosongkan. `data`: `id`, `url`, plus `isapproved` saat kirim ulang.
+
+### `approval`
+
+Butuh JWT staf. `action`: `list` (default), `approve`, `tolak`.
+
+**list** (filter opsional):
+
+| Field | Keterangan |
+|---|---|
+| `isapproved` | `pending`, `approve`, atau `canceled` (kosong = semua) |
+| `q` | cari `nocust` / `nmcust` |
+| `tanggal_dari` / `tanggal_sampai` | `YYYY-MM-DD` |
+| `tanggal` | legacy, mengisi dari & sampai |
+
+**approve / tolak:** `id` (PK `aka_reward`).
+
+Setujui menyimpan `isapproved=approve`, `approvedby` = username petugas, dan mengosongkan `catatan_admin`. Tolak wajib `catatan_admin` (3–500 karakter), menyimpan `isapproved=canceled` dan `approvedby` = username petugas.
+
+### `manageUsers`
+
+Butuh JWT `superadmin`. `action`: `list`, `create`, `update`, `delete`.
+
+**create:** `username`, `password` (min. 4), `nama`, `role` (`Musrifah`/`superadmin`), `code01` (wajib Musrifah).
+
+**update:** `id` + field create; `password` opsional.
+
+**delete:** `id` (tidak boleh hapus diri sendiri). Akun `siswa` tidak dikelola di sini.
+
+### `manageKatalog`
+
+Butuh JWT `superadmin`. Mengatur master `aka_prestasi_kategori` → `aka_prestasi_tingkat` → `aka_prestasi_poin`.
+
+| Field | Keterangan |
+|---|---|
+| `action` | `list`, `create`, `update`, `delete` |
+| `entity` | wajib selain `list`: `kategori`, `tingkat`, `poin` |
+
+**list:** `data.kategori` (termasuk `code01`), `data.tingkat`, `data.poin`, plus `sekolah`.
+
+**kategori create/update:** `kode` (A–Z / 0–9, 1–10), `nama` (maks. 120), `urut` opsional, `code01` (opsional; kosong = semua unit). Unik pada pasangan `(kode, code01)`.
+
+**tingkat create/update:** `kategori_id`, `nama`, `urut` opsional. Tidak ada field unit; ikut kategori induk.
+
+**poin create/update:** `tingkat_id`, `nama`, `nilai` (default `0.00`), `urut` opsional. Tidak ada override poin per unit; jika poin berbeda, buat kategori terpisah dengan `code01` unit itu.
+
+**delete:** `id`. Menolak jika masih dipakai `aka_reward`, atau jika masih ada anak (tingkat di kategori / capaian di tingkat).
+
+Poin pada data prestasi yang sudah masuk tidak diubah otomatis saat nilai master diedit.
+
+### `searchSiswa`
+
+Butuh JWT staf. Field `q` (min. 2 karakter). `data.items`: `custid`, `nocust`, `nmcust`, `kelas`, `code01`, `sekolah`. Musrifah hanya melihat siswi unitnya.
+
+### `manageCatatanKepribadian`
+
+Butuh JWT staf. `action`: `list`, `get`, `create`, `update`, `delete`.
+
+**create/update:** `nis`, `tahun_akademik` (`YYYY/YYYY`), `semester` (`1`/`2`), `jenis_pelanggaran`, `bentuk_pembinaan`, `skor`. Update plus `id`. Identitas nama/kelas diambil dari `scctcust` berdasarkan NIS.
+
+**get / delete:** `id`.
+
+### `manageTahfid`
+
+Butuh JWT. Siswa: `action` `myjadwal`, `submitsetoran`. Staf: `list` / `listjadwal`, `listkelas`, `get`, `save` / `create` / `update`, `delete`, `listpercepatan`, `savepercepatan`, `deletepercepatan`, `siswaprogress` / `getprogress`, `saveprogress`, `laporan` / `rekapsetoran`, `templateprogress` / `exportprogress`, `importprogress`. Tabel dibuat otomatis jika belum ada (`aka_tahfid_jadwal`, detail, setoran, progres).
+
+**laporan / rekapsetoran** (staf): rekap snapshot progress seluruh siswi di unit. Filter `code01` (superadmin; Musrifah memakai unitnya), `kelas`, `q` (NIS/nama). Tanpa unit: `need_unit=true`, `items` kosong.
+
+`data.items` per siswi: `custid`, `nocust`, `nmcust`, `kelas`, `target`, `lunas`, `proses`, `belum`, `persen`, `badge` (`belum` / `proses` / `lunas`), `percepatan`, `details`. Tiap detail: surat, status, `ayat_dari` / `ayat_sampai` / `ayat_label`, `catatan`, `setor_at`. Target = jadwal kelas + percepatan. Status surat dari `aka_tahfid_progress`, fallback `aka_tahfid_setoran` = lunas. Nilai status di API/DB tetap `lunas`; redaksi tampilan = Tuntas. Halaman laporan hanya menampilkan siswi yang punya jadwal (`target > 0`). Plus `ringkasan` (`jumlah_siswi`, `lunas_penuh`, `masih_proses`, `belum_mulai`), `sekolah`, `kelas`.
+
+**saveprogress** (staf): `status` `proses` atau `lunas` (`tuntas` / `selesai` / `lengkap` = alias lunas). Untuk proses, isi `ayat_dari` dan `ayat_sampai`.
+
+**templateprogress / exportprogress** (staf): unduh baris template setoran. `nis` = satu siswi, atau `code01` + `kelas` = seluruh siswi kelas. `data.rows`: `nis`, `nama`, `kelas`, `jadwal_detail_id`, surat, `asal`, `status_saat_ini` (`lunas` ditampilkan sebagai `tuntas` di Excel).
+
+**importprogress** (staf): `rows[]` maks. 500. Per baris: `nis`, `jadwal_detail_id`, `status` (`proses`/`lunas`/`tuntas`; `tuntas` = alias lunas; kosong = lewati), `ayat_dari`, `ayat_sampai`, `catatan`. Memakai `tahfidUpsertProgress`. `data`: `ok`, `skip`, `fail`, `errors`, `message`.
+
+---
+
+## Kode HTTP yang dipakai
+
+| Status | Arti khas |
+|---|---|
+| 200 | Sukses |
+| 401 | Login salah / token hilang / JWT invalid / sesi submit invalid |
+| 403 | Role tidak boleh / data akun tidak lengkap (login siswa) |
+| 404 | Admin / data approval tidak ketemu |
+| 422 | Validasi input / method tidak dikenal |
+| 500 | Konfigurasi kurang (`.env` / lib) atau error sistem |
+| 503 | Gagal koneksi database |
+
+---
+
+## Catatan integrasi Laravel
+
+- Frontend siswa memakai `login`, `getTahunAkademik`, `getPrestasiKatalog`, `getPrestasiSaya`, `submitPrestasi`.
+- `loginApproval`, `approval`, `manageUsers`, `manageKatalog` dipakai aplikasi Approval Prestasi (Laravel).
+- `loginApproval`, `searchSiswa`, `manageCatatanKepribadian` dipakai aplikasi Catatan Kepribadian Siswi (Laravel).
+- `loginApproval`, `searchSiswa`, `manageTahfid` dipakai aplikasi Tahfid (Laravel), termasuk `action` `laporan` di halaman Laporan Setoran.
+- Proxy siswa: `POST /api/reward` → `WS_URL` untuk login, tahun akademik, katalog, dan submit baru. `getPrestasiSaya` dan kirim ulang (`submitPrestasi` + `id`) dijalankan dari `ws/index.php` lokal sampai method itu di-upload ke server.
+- Tahun akademik di-cache Laravel (default 6 jam). Katalog prestasi cache singkat (60 detik, key `ws.prestasi_katalog.v3`).
+
+---
+
+## Checklist update README (saat `ws/` diganti)
+
+1. Method baru / berubah di `SECURE_INPUT_ALLOWED_METHODS`
+2. Tabel atau kolom baru di SQL
+3. Perubahan role, JWT payload, atau validasi
+4. Env baru
+5. Perubahan path upload atau aturan file
+6. Tanggal “Terakhir diselaraskan” di atas
